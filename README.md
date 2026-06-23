@@ -2,80 +2,44 @@
 
 `kx` is kubectl with context algebra.
 
-The idea is simple: I do not want another dashboard, and I do not want to keep
-teaching my shell which cluster I meant. I want one tiny binary that behaves like
-`kubectl` until I ask it to think in fleets.
+It is for Linux people with more than one cluster, too many namespaces, a
+terminal full of muscle memory, and exactly zero patience for "wait, was that
+prod?" moments.
+
+No dashboard pilgrimage. No kubeconfig superstition. No bash loop graveyard.
+`kubectl` stays the engine. `kx` becomes the operator shell around it.
 
 ```bash
 kx get pods -A
-kx @prod --parallel 4 get deploy -n payments
-kx @env=prod --dry-run delete pod old-api -n payments
-kx ctx tag aks-prod-weu env=prod region=eu team=payments risk=high
+kx @prod matrix deploy/api -n payments --cols context,ready,image,rollout
+kx @prod why deploy/api -n payments --deep
+kx @prod logs deploy/api -n payments --since 15m --grep 'error|panic|timeout'
+kx @prod diff deploy/api -n payments
 ```
 
-## Why this exists
+## What kx Does
 
-Kubernetes contexts are powerful, but daily multi-cluster work still feels like
-taping together shell loops, prompt hacks, fuzzy switchers, and careful prayers.
+`kx` treats contexts like a queryable fleet:
 
-`kx` keeps kubectl as the transport layer and adds the missing operator layer:
+- selectors: `@prod`, `@prod.eu`, `@env=prod`, `@team:payments`, `@/regex/`
+- context tags that never touch kubeconfig
+- guarded fan-out across many contexts
+- incident commands: `why`, `events`, `logs`
+- fleet views: `matrix`, `diff`, `drift`
+- RBAC checks: `can`, `access`
+- context hygiene: `ctx scan`, `ctx clean`
+- shell glue: `completion`, `shell-init`, `prompt`
+- Krew packaging template for release distribution
 
-- context selectors like `@prod`, `@prod.eu`, `@env=prod`, `@/regex/`
-- local context tags that do not touch kubeconfig
-- safe fan-out across many contexts
-- deterministic grouped output
-- JSONL output for `jq`, `rg`, `awk`, logs, and other terminal creature comforts
-- command history for multi-context runs
-- production-aware confirmation prompts
-- zero global context mutation when using selectors
+The mental model is:
 
-## Status
-
-This is the first cut. It is intentionally small, sharp, and boring where boring
-matters. Unknown Kubernetes behavior is delegated to `kubectl`; `kx` owns context
-selection, fan-out, safety, and output.
-
-## Kubernetes compatibility
-
-`kx` shells out to `kubectl`, so it follows the kubectl you have installed.
-
-The Kubernetes project publishes the latest stable kubectl download through:
-
-```bash
-https://dl.k8s.io/release/stable.txt
+```text
+selector + command + policy + output
 ```
 
-That means `kx` should not bake in a Kubernetes minor version. If kubectl can run
-the command, `kx` can route it.
+## Install
 
-## Platform stance
-
-`kx` is a Linux-first shell tool.
-
-It is written in Go and should build anywhere Go and `kubectl` run, but the
-project voice, examples, defaults, and development workflow assume a Linux
-terminal. The happy path is `bash`, `make`, `jq`, `rg`, kubeconfig, and a real
-operator shell.
-
-## Install from source
-
-```bash
-go install github.com/GabboPenna/kx@latest
-```
-
-For local development:
-
-```bash
-git clone https://github.com/GabboPenna/kx
-cd kx
-make test
-make build
-sudo install -m 0755 bin/kx /usr/local/bin/kx
-```
-
-## Install from a release
-
-Latest Linux `amd64` build:
+Latest Linux `amd64` release:
 
 ```bash
 tmp="$(mktemp -d)"
@@ -101,48 +65,20 @@ tar -xzf kx-linux-amd64.tar.gz -C "$tmp"
 sudo install -m 0755 "$tmp/kx-linux-amd64/kx" /usr/local/bin/kx
 ```
 
-## Quick start
-
-List contexts:
+From source:
 
 ```bash
-kx ctx ls
+go install github.com/GabboPenna/kx@latest
 ```
 
-Tag a context:
+Local hacker loop:
 
 ```bash
-kx ctx tag aks-prod-weu env=prod region=eu team=payments risk=high
-```
-
-Preview a selector:
-
-```bash
-kx ctx where @prod.eu
-```
-
-Run a normal kubectl command:
-
-```bash
-kx get pods -A
-```
-
-Run the same command across selected contexts:
-
-```bash
-kx @team=payments --parallel 4 get deploy -n payments
-```
-
-Plan without touching clusters:
-
-```bash
-kx @prod --dry-run rollout restart deploy/api -n payments
-```
-
-Machine output:
-
-```bash
-kx @prod --jsonl get pods -A | jq -r 'select(.line | test("CrashLoopBackOff"))'
+git clone https://github.com/GabboPenna/kx
+cd kx
+make test
+make build
+sudo install -m 0755 bin/kx /usr/local/bin/kx
 ```
 
 ## Selectors
@@ -153,19 +89,170 @@ Selectors start with `@`.
 | --- | --- |
 | `@all` | every kubeconfig context |
 | `@current` | current kubectl context |
-| `@prod` | fuzzy match against context names, cluster names, users, namespaces, and tags |
+| `@prod` | fuzzy match context, cluster, user, namespace, and tags |
 | `@prod.eu` | match all facets |
 | `@env=prod` | match local kx tag |
 | `@team:payments` | same as `@team=payments` |
 | `@/aks-prod-.*/` | regex against context names |
 | `@prod,@staging` | union of selectors |
 
-The `@prod.eu` form is the sweet spot. I want to type the way I think:
-"production, Europe, whatever the real context name is today".
+Tag contexts once, then stop memorizing cloud-provider soup:
 
-## Safety model
+```bash
+kx ctx tag aks-prod-weu env=prod region=eu team=payments risk=high
+kx ctx tag aks-stage-weu env=staging region=eu team=payments
+kx ctx where @prod.eu
+```
 
-`kx` is fast, but it should not be brave on your behalf.
+## Fleet Commands
+
+Normal kubectl still works:
+
+```bash
+kx get pods -A
+kx apply -f app.yaml
+```
+
+Fan out when you add a selector:
+
+```bash
+kx @prod --parallel 8 get deploy -n payments
+kx @prod --timeout 20s get nodes -o wide
+kx @prod --canary 1 rollout restart deploy/api -n payments
+```
+
+`kx` never mutates the global current context while doing selector fan-out.
+
+## Incident Mode
+
+### why
+
+`why` is the "tell me what hurts" command. It gathers the resource JSON,
+readiness, images, replicas, conditions, owner chain, rollout status, warning
+events, and optional deep describe/log detail.
+
+```bash
+kx why pod/api-6b7df8 -n payments
+kx @prod why deploy/api -n payments
+kx @prod why deploy/api -n payments --deep
+```
+
+### events
+
+Events without the archaeological dig:
+
+```bash
+kx events -n payments --warnings --since 30m
+kx @prod events -A --warnings --limit 80
+```
+
+### logs
+
+Logs get context prefixes, grep, and all-container defaults:
+
+```bash
+kx logs deploy/api -n payments --since 10m
+kx @prod logs deploy/api -n payments --since 15m --grep 'error|panic|timeout'
+```
+
+## Fleet Intelligence
+
+### matrix
+
+Compact state across contexts:
+
+```bash
+kx @prod matrix deploy/api -n payments
+kx @prod matrix deploy/api -n payments --cols context,ready,image,replicas,rollout
+```
+
+### diff
+
+Sanitized resource diff. It strips runtime noise like `status`, `uid`,
+`resourceVersion`, `managedFields`, and timestamps before comparing.
+
+```bash
+kx @staging,@prod diff deploy/api -n payments
+```
+
+### drift
+
+When you only need the shape of the problem:
+
+```bash
+kx @prod drift deploy/api -n payments
+```
+
+## RBAC Without Yoga
+
+Check one permission across the fleet:
+
+```bash
+kx @prod can delete pods -n kube-system
+kx @prod can create deployments -n payments
+```
+
+Print a quick access matrix:
+
+```bash
+kx access -n payments
+kx @prod access -n payments --resources pods,secrets,deployments --verbs get,list,create,delete
+```
+
+## Context Hygiene
+
+Find kubeconfig fragments:
+
+```bash
+kx ctx scan ~/.kube ~/.kube/configs.d
+```
+
+Clean local `kx` metadata for contexts that no longer exist in your active
+kubeconfig:
+
+```bash
+kx ctx clean --dry-run
+kx ctx clean
+```
+
+`kx` stores its own metadata under:
+
+```text
+~/.config/kx
+```
+
+Override it when you want disposable labs:
+
+```bash
+export KX_HOME="$PWD/.kx"
+```
+
+## Shell Glue
+
+Completion:
+
+```bash
+kx completion bash > ~/.local/share/bash-completion/completions/kx
+kx completion zsh > ~/.zfunc/_kx
+kx completion fish > ~/.config/fish/completions/kx.fish
+```
+
+Prompt segment:
+
+```bash
+kx prompt
+```
+
+Full shell init:
+
+```bash
+eval "$(kx shell-init bash)"
+```
+
+That gives you command completion plus a tiny context segment in your prompt.
+The point is constant context awareness without a spaceship prompt framework.
+
+## Safety
 
 Mutating commands such as `apply`, `delete`, `patch`, `scale`, `rollout restart`,
 `drain`, `cordon`, `label`, and `annotate` trigger confirmation when they target
@@ -174,78 +261,32 @@ multiple contexts or prod-like contexts.
 A context is prod-like when:
 
 - its name contains `prod`
-- its `env` tag is `prod`
-- its `risk` tag is `high`
 - the selector contains `prod`
+- it has `env=prod`
+- it has `risk=high`
 
-Automation can use:
+Automation can opt in explicitly:
 
 ```bash
 kx @prod --yes rollout restart deploy/api -n payments
-```
-
-or:
-
-```bash
 KX_FORCE=1 kx @prod rollout restart deploy/api -n payments
 ```
 
-## Options
+## Krew
 
-`kx` options go before the kubectl command:
-
-```bash
-kx @prod --parallel 8 --timeout 20s get pods -A
-```
-
-| Option | Description |
-| --- | --- |
-| `--parallel N` | run N contexts at a time |
-| `--timeout 20s` | stop slow context calls |
-| `--fail-fast` | skip pending work after the first failure |
-| `--dry-run` | print the selected contexts and command only |
-| `--canary N` | run only the first N matched contexts |
-| `--jsonl` | print line-oriented JSON |
-| `--no-header` | suppress grouped context headers |
-| `--yes`, `-y` | approve safety prompts |
-
-## Config files
-
-`kx` never writes to kubeconfig for tags or history.
-
-On Linux, `kx` stores metadata under:
-
-```text
-~/.config/kx
-```
-
-Override it with:
+Release assets are shaped for Krew. Generate a manifest after a release:
 
 ```bash
-export KX_HOME="$HOME/.kx"
+version="v0.2.0"
+curl -fsSLO "https://github.com/GabboPenna/kx/releases/download/$version/checksums.txt"
+scripts/render-krew-manifest.sh "$version" checksums.txt > packaging/krew/kx.yaml
 ```
 
-Stored files:
+The template lives at:
 
 ```text
-contexts.json
-history.jsonl
+packaging/krew/kx.template.yaml
 ```
-
-## Design notes
-
-`kx` is written in Go because the shape of the problem wants:
-
-- one static-feeling binary
-- fast startup
-- boring Linux builds
-- cheap concurrency
-- easy process control around `kubectl`
-- boring deployment
-
-The first version intentionally uses only the Go standard library. Fewer moving
-parts means fewer reasons for the tool to be annoying when you are already deep
-inside an incident.
 
 ## Releases
 
@@ -257,30 +298,37 @@ v0.2.0
 v1.0.0
 ```
 
-Pushing a tag like `v0.1.0` creates a GitHub Release with:
+Pushing a tag creates a GitHub Release with:
 
 ```text
 kx-linux-amd64.tar.gz
 kx-linux-arm64.tar.gz
 checksums.txt
+kx-krew.yaml
 ```
 
-Release notes are generated from the tagged commit history. The binary embeds
-the tag, commit, and build timestamp, so `kx --version` tells you exactly what
-you are running.
+The binary embeds tag, commit, and build timestamp:
 
-See `docs/RELEASING.md` for the full release flow.
+```bash
+kx --version
+```
 
-## Roadmap
+See `docs/RELEASING.md` for the release flow.
 
-- `kx history rerun failed`
-- `kx diff @prod get deploy/api -n payments`
-- shell completions for selectors and tags
-- Krew manifest
-- context groups committed to a repo
-- OpenTelemetry spans for fan-out runs
-- policy packs for dangerous verbs
-- plugin hooks before and after fan-out
+## Design
+
+`kx` is written in Go because this job wants:
+
+- one boring binary
+- fast startup
+- cheap fan-out concurrency
+- Linux-first release assets
+- easy process control around `kubectl`
+- no dependency carnival during an incident
+
+The first rule is compatibility: unknown Kubernetes behavior goes to `kubectl`.
+The second rule is context sanity: fleet operations should be explicit,
+queryable, repeatable, and hard to fat-finger.
 
 ## License
 

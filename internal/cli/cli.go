@@ -67,6 +67,28 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runHistoryCommand(rest[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(stdout, stderr)
+	case "why", "explain":
+		return runWhyCommand(opts, rest[1:], stdout, stderr)
+	case "matrix":
+		return runMatrixCommand(opts, rest[1:], stdout, stderr)
+	case "diff":
+		return runDiffCommand(opts, rest[1:], stdout, stderr)
+	case "drift":
+		return runDriftCommand(opts, rest[1:], stdout, stderr)
+	case "logs", "log":
+		return runLogsCommand(opts, rest[1:], stdout, stderr)
+	case "events", "event":
+		return runEventsCommand(opts, rest[1:], stdout, stderr)
+	case "can":
+		return runCanCommand(opts, rest[1:], stdout, stderr)
+	case "access":
+		return runAccessCommand(opts, rest[1:], stdout, stderr)
+	case "completion", "completions":
+		return runCompletionCommand(rest[1:], stdout, stderr)
+	case "shell-init":
+		return runShellInitCommand(rest[1:], stdout, stderr)
+	case "prompt":
+		return runPromptCommand(rest[1:], stdout, stderr)
 	}
 
 	return runKubectlLike(opts, rest, stdout, stderr)
@@ -438,6 +460,10 @@ func runContextCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		output.PrintContextNames(stdout, matches)
 		return 0
+	case "scan":
+		return runContextScanCommand(args[1:], kubeState, meta, kubectlPath, stdout, stderr)
+	case "clean":
+		return runContextCleanCommand(args[1:], kubeState, meta, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "kx: unknown ctx command %q\n", args[0])
 		return 2
@@ -538,6 +564,12 @@ Usage:
   kx ctx ls
   kx ctx tag <context> key=value [key=value...]
   kx history
+  kx why <resource> [-n namespace] [--deep]
+  kx matrix <resource> [-n namespace] [--cols context,ready,image]
+  kx diff <resource> [-n namespace]
+  kx logs <resource> [-n namespace] [--grep pattern]
+  kx events [-n namespace] [--warnings]
+  kx access [-n namespace]
 
 Selectors:
   @all                 every context in kubeconfig order
@@ -562,6 +594,9 @@ kx options before the kubectl command:
 Examples:
   kx get pods -A
   kx @prod --parallel 4 get deploy -n payments
+  kx @prod why deploy/api -n payments --deep
+  kx @prod matrix deploy/api -n payments --cols context,ready,image,rollout
+  kx @prod logs deploy/api -n payments --since 15m --grep error
   kx @env=prod --dry-run delete pod old-api -n payments
   kx ctx tag aks-prod-weu env=prod region=eu team=payments risk=high
 `)

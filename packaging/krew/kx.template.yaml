@@ -1,0 +1,42 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: kx
+spec:
+  version: "{{VERSION}}"
+  homepage: https://github.com/GabboPenna/kx
+  shortDescription: kubectl with context algebra
+  description: |
+    kx is a Linux-first kubectl companion for operators who work across more
+    than one cluster. It adds fleet selectors, context tags, guarded fan-out,
+    incident commands, drift views, RBAC matrices, shell integration, and
+    context metadata hygiene while keeping kubectl as the execution engine.
+  platforms:
+    - selector:
+        matchLabels:
+          os: linux
+          arch: amd64
+      uri: https://github.com/GabboPenna/kx/releases/download/{{VERSION}}/kx-linux-amd64.tar.gz
+      sha256: "{{SHA256_LINUX_AMD64}}"
+      bin: kx
+      files:
+        - from: kx-linux-amd64/kx
+          to: kx
+        - from: kx-linux-amd64/LICENSE
+          to: LICENSE
+        - from: kx-linux-amd64/README.md
+          to: README.md
+    - selector:
+        matchLabels:
+          os: linux
+          arch: arm64
+      uri: https://github.com/GabboPenna/kx/releases/download/{{VERSION}}/kx-linux-arm64.tar.gz
+      sha256: "{{SHA256_LINUX_ARM64}}"
+      bin: kx
+      files:
+        - from: kx-linux-arm64/kx
+          to: kx
+        - from: kx-linux-arm64/LICENSE
+          to: LICENSE
+        - from: kx-linux-arm64/README.md
+          to: README.md

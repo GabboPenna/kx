@@ -42,6 +42,7 @@ jobs:
           export COMMIT="${COMMIT::12}"
           export DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           sh scripts/build-release.sh
+          sh scripts/render-krew-manifest.sh "$VERSION" dist/checksums.txt > dist/kx-krew.yaml
 
       - name: Create GitHub Release
         env:
@@ -56,4 +57,5 @@ jobs:
             dist/kx-linux-amd64.tar.gz \
             dist/kx-linux-arm64.tar.gz \
             dist/checksums.txt \
+            dist/kx-krew.yaml \
             "${flags[@]}"

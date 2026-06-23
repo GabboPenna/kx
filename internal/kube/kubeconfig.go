@@ -35,7 +35,13 @@ type rawKubeConfig struct {
 
 // Load asks kubectl to parse kubeconfig. I would rather trust kubectl here than guess every kubeconfig edge case.
 func Load(kubectlPath string) (State, error) {
-	cmd := exec.Command(kubectlPath, "config", "view", "-o", "json")
+	return LoadWithPrefix(kubectlPath, nil)
+}
+
+func LoadWithPrefix(kubectlPath string, prefix []string) (State, error) {
+	args := append([]string{}, prefix...)
+	args = append(args, "config", "view", "-o", "json")
+	cmd := exec.Command(kubectlPath, args...)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	cmd.Stdout = &out

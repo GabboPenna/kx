@@ -37,6 +37,7 @@ Each release publishes:
 kx-linux-amd64.tar.gz
 kx-linux-arm64.tar.gz
 checksums.txt
+kx-krew.yaml
 ```
 
 Each tarball contains:
@@ -69,6 +70,7 @@ Build the same Linux assets locally:
 
 ```bash
 VERSION=v0.1.0 sh scripts/build-release.sh
+scripts/render-krew-manifest.sh v0.1.0 dist/checksums.txt > dist/kx-krew.yaml
 ls -lh dist/
 sha256sum -c dist/checksums.txt
 ```

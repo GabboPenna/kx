@@ -8,7 +8,8 @@ import (
 )
 
 type Metadata struct {
-	ContextTags map[string]map[string]string `json:"contextTags"`
+	ContextTags    map[string]map[string]string `json:"contextTags"`
+	ContextSources map[string][]string          `json:"contextSources,omitempty"`
 }
 
 func Load() (Metadata, error) {
@@ -18,7 +19,10 @@ func Load() (Metadata, error) {
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return Metadata{ContextTags: map[string]map[string]string{}}, nil
+		return Metadata{
+			ContextTags:    map[string]map[string]string{},
+			ContextSources: map[string][]string{},
+		}, nil
 	}
 	if err != nil {
 		return Metadata{}, err
@@ -29,6 +33,9 @@ func Load() (Metadata, error) {
 	}
 	if meta.ContextTags == nil {
 		meta.ContextTags = map[string]map[string]string{}
+	}
+	if meta.ContextSources == nil {
+		meta.ContextSources = map[string][]string{}
 	}
 	return meta, nil
 }
