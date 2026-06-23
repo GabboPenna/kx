@@ -1,0 +1,5 @@
+bin/
+dist/
+.tools/
+coverage.out
+*.exe
