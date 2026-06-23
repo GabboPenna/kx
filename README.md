@@ -11,6 +11,7 @@ No dashboard pilgrimage. No kubeconfig superstition. No bash loop graveyard.
 
 ```bash
 kx get pods -A
+kx @prod matrix -n payments
 kx @prod matrix deploy/api -n payments --cols context,ready,image,rollout
 kx @prod why deploy/api -n payments --deep
 kx @prod logs deploy/api -n payments --since 15m --grep 'error|panic|timeout'
@@ -53,7 +54,7 @@ kx --version
 Pinned release with checksum verification:
 
 ```bash
-version="v0.1.0"
+version="v0.2.1"
 base="https://github.com/GabboPenna/kx/releases/download/$version"
 
 curl -fsSLO "$base/kx-linux-amd64.tar.gz"
@@ -159,12 +160,36 @@ kx @prod logs deploy/api -n payments --since 15m --grep 'error|panic|timeout'
 
 ### matrix
 
-Compact state across contexts:
+The matrix is the little ops table you wanted every time a namespace started
+acting cursed at 02:00.
+
+Resource mode compares one target across contexts:
 
 ```bash
 kx @prod matrix deploy/api -n payments
 kx @prod matrix deploy/api -n payments --cols context,ready,image,replicas,rollout
 ```
+
+Namespace mode scans a whole namespace and prints a compact inventory with
+`STATUS`, `READY`, `REPLICAS`, `AGE`, and images:
+
+```bash
+kx matrix -n payments
+kx @prod matrix -n payments
+kx @prod matrix -n payments --resources deployments,pods,services,ingresses
+kx @prod matrix -n payments --cols context,kind,name,status,ready,age
+```
+
+By default namespace mode checks:
+
+```text
+deployments,statefulsets,daemonsets,pods,services,ingresses,jobs,cronjobs
+```
+
+Output is intentionally boring in the best possible way: fixed table headers,
+bounded columns, deterministic sorting, and enough status translation to spot
+`ImagePullBackOff`, degraded workloads, suspended CronJobs, pending Ingresses,
+and service types without cracking open another pane.
 
 ### diff
 

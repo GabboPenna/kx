@@ -1,6 +1,12 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GabboPenna/kx/internal/history"
+)
 
 func TestParseGlobalOptionsStopsAtKubectlCommand(t *testing.T) {
 	opts, rest, err := parseGlobalOptions([]string{"@prod", "--parallel", "4", "apply", "-f", "app.yaml", "--dry-run=server"})
@@ -59,5 +65,100 @@ func TestSanitizeJSONDropsRuntimeNoise(t *testing.T) {
 		if _, ok := meta[key]; ok {
 			t.Fatalf("%s should be removed", key)
 		}
+	}
+}
+
+func TestMatrixNamespaceMode(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "empty means current namespace overview", args: nil, want: true},
+		{name: "namespace flag means namespace overview", args: []string{"-n", "payments"}, want: true},
+		{name: "selector flag still means namespace overview", args: []string{"-n", "payments", "-l", "app=api"}, want: true},
+		{name: "resource target means resource mode", args: []string{"deploy/api", "-n", "payments"}, want: false},
+		{name: "resource list means resource mode", args: []string{"pods", "-A"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matrixNamespaceMode(tt.args); got != tt.want {
+				t.Fatalf("matrixNamespaceMode(%#v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrintMatrixHasHeaderAndFitsLongCells(t *testing.T) {
+	longImage := "ghcr.io/acme/payments/api:" + strings.Repeat("0123456789", 12)
+	var out strings.Builder
+	printMatrix(&out, matrixPrintOptions{
+		Cols:     splitCSV("context,namespace,kind,name,status,image"),
+		Mode:     "namespace",
+		Scope:    "namespace/payments",
+		Contexts: 1,
+		Rows: []objectSummary{{
+			Context:   "prod-eu-west-1",
+			Namespace: "payments",
+			Kind:      "Deployment",
+			Name:      "api",
+			Status:    "Ready",
+			Image:     longImage,
+		}},
+	})
+	text := out.String()
+	for _, want := range []string{"kx matrix", "mode: namespace", "CONTEXT", "STATUS", "..."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("matrix output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, longImage) {
+		t.Fatalf("matrix output should fit long cells:\n%s", text)
+	}
+}
+
+func TestStatusStringPodWaitingReason(t *testing.T) {
+	obj := kubeAny{
+		"kind": "Pod",
+		"status": map[string]any{
+			"phase": "Pending",
+			"containerStatuses": []any{
+				map[string]any{
+					"state": map[string]any{
+						"waiting": map[string]any{"reason": "ImagePullBackOff"},
+					},
+				},
+			},
+		},
+	}
+	if got := statusString(obj); got != "ImagePullBackOff" {
+		t.Fatalf("statusString() = %q, want ImagePullBackOff", got)
+	}
+}
+
+func TestStatusStringRunningPodNotReady(t *testing.T) {
+	obj := kubeAny{
+		"kind": "Pod",
+		"status": map[string]any{
+			"phase": "Running",
+			"containerStatuses": []any{
+				map[string]any{"ready": true},
+				map[string]any{"ready": false},
+			},
+		},
+	}
+	if got := statusString(obj); got != "NotReady" {
+		t.Fatalf("statusString() = %q, want NotReady", got)
+	}
+}
+
+func TestPrintPrefixedIncludesStreamColumn(t *testing.T) {
+	var out strings.Builder
+	printPrefixed(&out, []history.Result{
+		{Context: "prod", Stdout: "ok\n", Stderr: "warn\n", Duration: time.Millisecond},
+	})
+	text := out.String()
+	if !strings.Contains(text, "| out | ok") || !strings.Contains(text, "| err | warn") {
+		t.Fatalf("unexpected prefixed output:\n%s", text)
 	}
 }

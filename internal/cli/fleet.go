@@ -32,6 +32,7 @@ type objectSummary struct {
 	Kind      string
 	Name      string
 	Namespace string
+	Status    string
 	Ready     string
 	Image     string
 	Replicas  string
@@ -50,6 +51,8 @@ type eventRow struct {
 	Message   string
 	Count     string
 }
+
+const namespaceMatrixResources = "deployments,statefulsets,daemonsets,pods,services,ingresses,jobs,cronjobs"
 
 func runWhyCommand(opts globalOptions, args []string, stdout io.Writer, stderr io.Writer) int {
 	kubectlPath, contexts, err := resolveCommandContexts(opts)
@@ -135,12 +138,18 @@ func whyOne(kubectlPath, contextName string, args []string, deep bool) (string, 
 
 func runMatrixCommand(opts globalOptions, args []string, stdout io.Writer, stderr io.Writer) int {
 	colsValue, args := removeValueFlag(args, "--cols")
+	resourcesValue, args := removeValueFlag(args, "--resources")
+	namespaceMode := matrixNamespaceMode(args)
 	if colsValue == "" {
-		colsValue = "context,kind,name,namespace,ready,image,replicas,rollout,age,warnings"
+		if namespaceMode {
+			colsValue = "context,namespace,kind,name,status,ready,replicas,age,image"
+		} else {
+			colsValue = "context,namespace,kind,name,status,ready,image,replicas,rollout,age"
+		}
 	}
 	cols := splitCSV(colsValue)
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: kx [@selector] matrix <resource> [-n namespace] [--cols context,ready,image]")
+	if len(args) == 0 && !namespaceMode {
+		fmt.Fprintln(stderr, "usage: kx [@selector] matrix [resource] [-n namespace] [--resources deployments,pods] [--cols context,ready,image]")
 		return 2
 	}
 	kubectlPath, contexts, err := resolveCommandContexts(opts)
@@ -153,37 +162,189 @@ func runMatrixCommand(opts globalOptions, args []string, stdout io.Writer, stder
 	var mu sync.Mutex
 	results := runContextJobs(contexts, opts, func(ctx kube.Context) history.Result {
 		started := time.Now()
-		obj, errOut, err := getObject(kubectlPath, ctx.Name, args)
-		if err != nil {
-			return history.Result{Context: ctx.Name, ExitCode: 1, Stderr: errOut, Duration: time.Since(started)}
-		}
-		local := summarizeObjects(ctx.Name, obj)
-		if needsColumn(cols, "rollout") {
-			for i := range local {
-				if target := rolloutResource(objectAt(obj, i)); target != "" {
-					out, _, code := runKubectlCapture(kubectlPath, ctx.Name, append([]string{"rollout", "status", target}, append(namespaceArgs(args), "--watch=false")...), 20*time.Second)
-					if code == 0 {
-						local[i].Rollout = oneLine(out)
-					}
-				}
+		var local []objectSummary
+		var stderr string
+		var failed bool
+		if namespaceMode {
+			local, stderr, failed = namespaceMatrixRows(kubectlPath, ctx.Name, args, splitCSV(defaultIfEmpty(resourcesValue, namespaceMatrixResources)), needsColumn(cols, "rollout"))
+		} else {
+			obj, errOut, err := getObject(kubectlPath, ctx.Name, args)
+			if err != nil {
+				return history.Result{Context: ctx.Name, ExitCode: 1, Stderr: errOut, Duration: time.Since(started)}
+			}
+			local = summarizeObjects(ctx.Name, obj)
+			if needsColumn(cols, "rollout") {
+				attachRolloutStatus(kubectlPath, ctx.Name, args, obj, local)
 			}
 		}
 		mu.Lock()
 		rows = append(rows, local...)
 		mu.Unlock()
-		return history.Result{Context: ctx.Name, ExitCode: 0, Duration: time.Since(started)}
+		exitCode := 0
+		if failed {
+			exitCode = 1
+		}
+		return history.Result{Context: ctx.Name, ExitCode: exitCode, Stderr: stderr, Duration: time.Since(started)}
 	})
 	if hasFailures(results) {
-		printGroupedSpecial(stderr, "matrix-errors", results)
+		printGroupedSpecial(stderr, "matrix errors", results)
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Context == rows[j].Context {
-			return rows[i].Name < rows[j].Name
+		if rows[i].Context != rows[j].Context {
+			return rows[i].Context < rows[j].Context
 		}
-		return rows[i].Context < rows[j].Context
+		if rows[i].Namespace != rows[j].Namespace {
+			return rows[i].Namespace < rows[j].Namespace
+		}
+		if kindRank(rows[i].Kind) != kindRank(rows[j].Kind) {
+			return kindRank(rows[i].Kind) < kindRank(rows[j].Kind)
+		}
+		return rows[i].Name < rows[j].Name
 	})
-	printMatrix(stdout, cols, rows)
+	resources := splitCSV(defaultIfEmpty(resourcesValue, namespaceMatrixResources))
+	if !namespaceMode {
+		resources = nil
+	}
+	printMatrix(stdout, matrixPrintOptions{
+		Cols:      cols,
+		Rows:      rows,
+		Mode:      matrixModeLabel(namespaceMode),
+		Scope:     matrixScope(args),
+		Contexts:  len(contexts),
+		Failures:  countFailures(results),
+		Resources: resources,
+	})
 	return exitFromResults(results)
+}
+
+func matrixNamespaceMode(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-n" || arg == "--namespace" || arg == "-l" || arg == "--selector" || arg == "--field-selector":
+			i++
+		case arg == "-A" || arg == "--all-namespaces" || arg == "--show-labels" || arg == "--ignore-not-found":
+			continue
+		case strings.HasPrefix(arg, "-n=") || strings.HasPrefix(arg, "--namespace="):
+			continue
+		case strings.HasPrefix(arg, "-l=") || strings.HasPrefix(arg, "--selector=") || strings.HasPrefix(arg, "--field-selector="):
+			continue
+		case strings.HasPrefix(arg, "-"):
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func namespaceMatrixRows(kubectlPath, contextName string, args []string, resources []string, includeRollout bool) ([]objectSummary, string, bool) {
+	var rows []objectSummary
+	var hardErrors []string
+	for _, resource := range resources {
+		obj, errOut, err := getObject(kubectlPath, contextName, append([]string{resource}, args...))
+		if err != nil {
+			if ignorableMatrixError(errOut) {
+				continue
+			}
+			hardErrors = append(hardErrors, fmt.Sprintf("%s: %s", resource, oneLine(errOut)))
+			continue
+		}
+		local := summarizeObjects(contextName, obj)
+		if includeRollout {
+			attachRolloutStatus(kubectlPath, contextName, args, obj, local)
+		}
+		rows = append(rows, local...)
+	}
+	if len(hardErrors) > 0 {
+		return rows, strings.Join(hardErrors, "\n") + "\n", true
+	}
+	return rows, "", false
+}
+
+func ignorableMatrixError(text string) bool {
+	text = strings.ToLower(text)
+	return strings.Contains(text, "the server doesn't have a resource type") ||
+		strings.Contains(text, "no matches for kind")
+}
+
+func attachRolloutStatus(kubectlPath, contextName string, args []string, obj kubeAny, rows []objectSummary) {
+	for i := range rows {
+		if target := rolloutResource(objectAt(obj, i)); target != "" {
+			out, _, code := runKubectlCapture(kubectlPath, contextName, append([]string{"rollout", "status", target}, append(namespaceArgs(args), "--watch=false")...), 20*time.Second)
+			if code == 0 {
+				rows[i].Rollout = oneLine(out)
+			}
+		}
+	}
+}
+
+func kindRank(kind string) int {
+	switch kind {
+	case "Deployment":
+		return 10
+	case "StatefulSet":
+		return 20
+	case "DaemonSet":
+		return 30
+	case "Pod":
+		return 40
+	case "Service":
+		return 50
+	case "Ingress":
+		return 60
+	case "Job":
+		return 70
+	case "CronJob":
+		return 80
+	default:
+		return 999
+	}
+}
+
+func matrixModeLabel(namespaceMode bool) string {
+	if namespaceMode {
+		return "namespace"
+	}
+	return "resource"
+}
+
+func matrixScope(args []string) string {
+	allNamespaces := false
+	namespace := ""
+	var target []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-A" || arg == "--all-namespaces":
+			allNamespaces = true
+		case arg == "-n" || arg == "--namespace":
+			if i+1 < len(args) {
+				namespace = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(arg, "-n="):
+			namespace = strings.TrimPrefix(arg, "-n=")
+		case strings.HasPrefix(arg, "--namespace="):
+			namespace = strings.TrimPrefix(arg, "--namespace=")
+		case arg == "-l" || arg == "--selector" || arg == "--field-selector":
+			i++
+		case strings.HasPrefix(arg, "-"):
+			continue
+		default:
+			target = append(target, arg)
+		}
+	}
+	scope := "current namespace"
+	if allNamespaces {
+		scope = "all namespaces"
+	} else if namespace != "" {
+		scope = "namespace/" + namespace
+	}
+	if len(target) == 0 {
+		return scope
+	}
+	return strings.Join(target, " ") + " in " + scope
 }
 
 func runDiffCommand(opts globalOptions, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -227,22 +388,22 @@ func runDiffLike(opts globalOptions, args []string, stdout io.Writer, stderr io.
 		return history.Result{Context: ctx.Name, ExitCode: 0, Duration: time.Since(started)}
 	})
 	if hasFailures(results) {
-		printGroupedSpecial(stderr, "diff-errors", results)
+		printGroupedSpecial(stderr, "diff errors", results)
 		return 1
 	}
 	groups := map[string][]string{}
 	for _, it := range items {
 		groups[it.hash] = append(groups[it.hash], it.context)
 	}
-	fmt.Fprintf(stdout, "drift groups: %d\n", len(groups))
+	fmt.Fprintf(stdout, "kx drift\n")
+	fmt.Fprintf(stdout, "target: %s\n", strings.Join(args, " "))
+	fmt.Fprintf(stdout, "contexts: %d  groups: %d\n\n", len(contexts), len(groups))
 	hashes := make([]string, 0, len(groups))
 	for hash := range groups {
 		hashes = append(hashes, hash)
 	}
 	sort.Strings(hashes)
-	for _, hash := range hashes {
-		fmt.Fprintf(stdout, "  %s  %s\n", hash, strings.Join(groups[hash], ","))
-	}
+	printHashGroups(stdout, hashes, groups)
 	if len(groups) <= 1 || !showDiff {
 		return 0
 	}
@@ -318,8 +479,12 @@ func runEventsCommand(opts globalOptions, args []string, stdout io.Writer, stder
 			return history.Result{Context: ctx.Name, ExitCode: 1, Stderr: errText, Duration: time.Since(started)}
 		}
 		var b strings.Builder
+		if len(rows) > 0 {
+			fmt.Fprintf(&b, "%-8s %-7s %-24s %-32s %s\n", "TIME", "TYPE", "REASON", "OBJECT", "MESSAGE")
+			fmt.Fprintf(&b, "%-8s %-7s %-24s %-32s %s\n", "--------", "-------", "------------------------", "--------------------------------", "-------")
+		}
 		for _, row := range rows {
-			fmt.Fprintf(&b, "%s %-7s %-24s %-28s %s\n", row.Time.Format("15:04:05"), row.Type, row.Reason, row.Object, row.Message)
+			fmt.Fprintf(&b, "%-8s %-7s %-24s %-32s %s\n", row.Time.Format("15:04:05"), row.Type, fit(row.Reason, 24), fit(row.Object, 32), row.Message)
 		}
 		return history.Result{Context: ctx.Name, ExitCode: 0, Stdout: b.String(), Duration: time.Since(started)}
 	})
@@ -686,6 +851,7 @@ func summarizeObject(contextName string, obj kubeAny) objectSummary {
 		Namespace: stringValue(meta, "namespace"),
 		Age:       ageString(stringValue(meta, "creationTimestamp")),
 		Image:     strings.Join(imagesFromObject(obj), ","),
+		Status:    statusString(obj),
 		Ready:     readyString(obj),
 		Warnings:  "-",
 	}
@@ -696,6 +862,16 @@ func summarizeObject(contextName string, obj kubeAny) objectSummary {
 	readyReplicas := intish(status["readyReplicas"])
 	if replicas != "" || readyReplicas != "" {
 		row.Replicas = readyReplicas + "/" + defaultIfEmpty(replicas, "?")
+	}
+	switch row.Kind {
+	case "DaemonSet":
+		row.Replicas = defaultIfEmpty(intish(status["numberReady"]), "0") + "/" + defaultIfEmpty(intish(status["desiredNumberScheduled"]), "?")
+	case "Job":
+		row.Replicas = defaultIfEmpty(intish(status["succeeded"]), "0") + "/" + defaultIfEmpty(intish(spec["completions"]), "?")
+	case "CronJob":
+		if active := activeCount(status); active > 0 {
+			row.Replicas = fmt.Sprintf("%d active", active)
+		}
 	}
 	return row
 }
@@ -744,6 +920,20 @@ func intish(v any) string {
 		return n
 	default:
 		return ""
+	}
+}
+
+func intValue(m map[string]any, key string) (int, bool) {
+	switch n := m[key].(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case string:
+		value, err := strconv.Atoi(n)
+		return value, err == nil
+	default:
+		return 0, false
 	}
 }
 
@@ -810,6 +1000,150 @@ func readyString(obj kubeAny) string {
 		}
 	}
 	return "-"
+}
+
+func statusString(obj kubeAny) string {
+	kind := stringValue(obj, "kind")
+	meta := mapValue(obj, "metadata")
+	spec := mapValue(obj, "spec")
+	status := mapValue(obj, "status")
+	if stringValue(meta, "deletionTimestamp") != "" {
+		return "Terminating"
+	}
+	switch kind {
+	case "Pod":
+		if reason := containerStateReason(status); reason != "" {
+			return reason
+		}
+		phase := defaultIfEmpty(stringValue(status, "phase"), "Unknown")
+		if phase == "Running" && readyMismatch(readyString(obj)) {
+			return "NotReady"
+		}
+		return phase
+	case "Deployment", "StatefulSet", "ReplicaSet":
+		desired, desiredOK := intValue(spec, "replicas")
+		ready, readyOK := intValue(status, "readyReplicas")
+		if unavailable, ok := intValue(status, "unavailableReplicas"); ok && unavailable > 0 {
+			return "Degraded"
+		}
+		if desiredOK && desired == 0 {
+			return "ScaledToZero"
+		}
+		if desiredOK && readyOK && ready >= desired {
+			return "Ready"
+		}
+		return "Progressing"
+	case "DaemonSet":
+		desired, desiredOK := intValue(status, "desiredNumberScheduled")
+		ready, readyOK := intValue(status, "numberReady")
+		if desiredOK && desired == 0 {
+			return "ScaledToZero"
+		}
+		if desiredOK && readyOK && ready >= desired {
+			return "Ready"
+		}
+		return "Degraded"
+	case "Job":
+		if hasCondition(status, "Failed", "True") {
+			return "Failed"
+		}
+		if hasCondition(status, "Complete", "True") {
+			return "Complete"
+		}
+		if active, ok := intValue(status, "active"); ok && active > 0 {
+			return "Running"
+		}
+		return "Pending"
+	case "CronJob":
+		if suspended, ok := spec["suspend"].(bool); ok && suspended {
+			return "Suspended"
+		}
+		if active := activeCount(status); active > 0 {
+			return fmt.Sprintf("Active:%d", active)
+		}
+		return "Idle"
+	case "Service":
+		return defaultIfEmpty(stringValue(spec, "type"), "Service")
+	case "Ingress":
+		lb := mapValue(status, "loadBalancer")
+		if ingress, ok := lb["ingress"].([]any); ok && len(ingress) > 0 {
+			return "Ready"
+		}
+		return "Pending"
+	default:
+		if phase := stringValue(status, "phase"); phase != "" {
+			return phase
+		}
+		if hasCondition(status, "Ready", "True") {
+			return "Ready"
+		}
+		if hasCondition(status, "Ready", "False") {
+			return "NotReady"
+		}
+	}
+	return "-"
+}
+
+func containerStateReason(status map[string]any) string {
+	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
+		statuses, ok := status[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range statuses {
+			container, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			state := mapValue(container, "state")
+			waiting := mapValue(state, "waiting")
+			if reason := stringValue(waiting, "reason"); reason != "" {
+				return reason
+			}
+			terminated := mapValue(state, "terminated")
+			if reason := stringValue(terminated, "reason"); reason != "" && reason != "Completed" {
+				return reason
+			}
+		}
+	}
+	return ""
+}
+
+func hasCondition(status map[string]any, condType string, condStatus string) bool {
+	conditions, ok := status["conditions"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range conditions {
+		cond, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringValue(cond, "type") == condType && stringValue(cond, "status") == condStatus {
+			return true
+		}
+	}
+	return false
+}
+
+func activeCount(status map[string]any) int {
+	active, ok := status["active"].([]any)
+	if !ok {
+		return 0
+	}
+	return len(active)
+}
+
+func readyMismatch(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return false
+	}
+	parts := strings.Split(fields[len(fields)-1], "/")
+	if len(parts) != 2 {
+		return false
+	}
+	return parts[0] != parts[1]
 }
 
 func objectConditions(obj kubeAny) []string {
@@ -1006,7 +1340,29 @@ func sanitizeMetadata(meta map[string]any) map[string]any {
 	return out
 }
 
-func printMatrix(w io.Writer, cols []string, rows []objectSummary) {
+type matrixPrintOptions struct {
+	Cols      []string
+	Rows      []objectSummary
+	Mode      string
+	Scope     string
+	Contexts  int
+	Failures  int
+	Resources []string
+}
+
+func printMatrix(w io.Writer, opts matrixPrintOptions) {
+	cols := opts.Cols
+	rows := opts.Rows
+	fmt.Fprintln(w, "kx matrix")
+	fmt.Fprintf(w, "mode: %s  scope: %s  contexts: %d  rows: %d  failures: %d\n", opts.Mode, opts.Scope, opts.Contexts, len(rows), opts.Failures)
+	if len(opts.Resources) > 0 {
+		fmt.Fprintf(w, "resources: %s\n", strings.Join(opts.Resources, ","))
+	}
+	fmt.Fprintln(w)
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "no rows")
+		return
+	}
 	widths := map[string]int{}
 	for _, col := range cols {
 		widths[col] = len(strings.ToUpper(col))
@@ -1014,27 +1370,56 @@ func printMatrix(w io.Writer, cols []string, rows []objectSummary) {
 	for _, row := range rows {
 		values := summaryValues(row)
 		for _, col := range cols {
-			if len(values[col]) > widths[col] {
-				widths[col] = len(values[col])
+			value := fit(dash(values[col]), matrixColumnLimit(col))
+			if len(value) > widths[col] {
+				widths[col] = len(value)
 			}
 		}
 	}
+	printTableLine(w, cols, widths, func(col string) string { return strings.ToUpper(col) })
+	printTableLine(w, cols, widths, func(col string) string { return strings.Repeat("-", widths[col]) })
+	for _, row := range rows {
+		values := summaryValues(row)
+		printTableLine(w, cols, widths, func(col string) string {
+			return fit(dash(values[col]), matrixColumnLimit(col))
+		})
+	}
+}
+
+func printTableLine(w io.Writer, cols []string, widths map[string]int, value func(string) string) {
 	for i, col := range cols {
 		if i > 0 {
 			fmt.Fprint(w, "  ")
 		}
-		fmt.Fprintf(w, "%-*s", widths[col], strings.ToUpper(col))
+		fmt.Fprintf(w, "%-*s", widths[col], value(col))
 	}
 	fmt.Fprintln(w)
-	for _, row := range rows {
-		values := summaryValues(row)
-		for i, col := range cols {
-			if i > 0 {
-				fmt.Fprint(w, "  ")
-			}
-			fmt.Fprintf(w, "%-*s", widths[col], dash(values[col]))
-		}
-		fmt.Fprintln(w)
+}
+
+func matrixColumnLimit(col string) int {
+	switch col {
+	case "context":
+		return 34
+	case "namespace":
+		return 24
+	case "kind":
+		return 16
+	case "name":
+		return 48
+	case "status":
+		return 28
+	case "ready":
+		return 28
+	case "image":
+		return 64
+	case "rollout":
+		return 72
+	case "warnings":
+		return 72
+	case "hash":
+		return 16
+	default:
+		return 40
 	}
 }
 
@@ -1044,6 +1429,7 @@ func summaryValues(row objectSummary) map[string]string {
 		"kind":      row.Kind,
 		"name":      row.Name,
 		"namespace": row.Namespace,
+		"status":    row.Status,
 		"ready":     row.Ready,
 		"image":     row.Image,
 		"replicas":  row.Replicas,
@@ -1055,35 +1441,93 @@ func summaryValues(row objectSummary) map[string]string {
 }
 
 func printGroupedSpecial(w io.Writer, label string, results []history.Result) {
+	errorsOnly := strings.Contains(label, "errors")
+	failures := countFailures(results)
+	ok := len(results) - failures
+	fmt.Fprintf(w, "kx %s\n", label)
+	fmt.Fprintf(w, "contexts: %d  ok: %d  failed: %d\n\n", len(results), ok, failures)
 	for _, result := range results {
+		if errorsOnly && result.ExitCode == 0 && result.Stderr == "" {
+			continue
+		}
 		status := "ok"
 		if result.ExitCode != 0 {
-			status = fmt.Sprintf("exit=%d", result.ExitCode)
+			status = fmt.Sprintf("exit %d", result.ExitCode)
 		}
-		fmt.Fprintf(w, "### %s %s (%s)\n", result.Context, label, status)
+		fmt.Fprintf(w, "[%s] %s  %s\n", result.Context, status, durationLabel(result.Duration))
+		fmt.Fprintln(w, strings.Repeat("-", 48))
+		wrote := false
 		if result.Stdout != "" {
 			fmt.Fprint(w, result.Stdout)
 			if !strings.HasSuffix(result.Stdout, "\n") {
 				fmt.Fprintln(w)
 			}
+			wrote = true
 		}
 		if result.Stderr != "" {
 			fmt.Fprint(w, result.Stderr)
 			if !strings.HasSuffix(result.Stderr, "\n") {
 				fmt.Fprintln(w)
 			}
+			wrote = true
 		}
+		if !wrote {
+			fmt.Fprintln(w, "(no output)")
+		}
+		fmt.Fprintln(w)
 	}
 }
 
 func printPrefixed(w io.Writer, results []history.Result) {
+	width := len("context")
+	for _, result := range results {
+		if len(result.Context) > width {
+			width = len(result.Context)
+		}
+	}
 	for _, result := range results {
 		for _, line := range splitOutputLines(result.Stdout) {
-			fmt.Fprintf(w, "%s | %s\n", result.Context, line)
+			fmt.Fprintf(w, "%-*s | out | %s\n", width, result.Context, line)
 		}
 		for _, line := range splitOutputLines(result.Stderr) {
-			fmt.Fprintf(w, "%s ! %s\n", result.Context, line)
+			fmt.Fprintf(w, "%-*s | err | %s\n", width, result.Context, line)
 		}
+	}
+}
+
+func countFailures(results []history.Result) int {
+	failures := 0
+	for _, result := range results {
+		if result.ExitCode != 0 {
+			failures++
+		}
+	}
+	return failures
+}
+
+func durationLabel(d time.Duration) string {
+	if d <= 0 {
+		return "-"
+	}
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(100 * time.Millisecond).String()
+}
+
+func printHashGroups(w io.Writer, hashes []string, groups map[string][]string) {
+	widthHash := len("HASH")
+	for _, hash := range hashes {
+		if len(hash) > widthHash {
+			widthHash = len(hash)
+		}
+	}
+	fmt.Fprintf(w, "%-*s  %-5s  %s\n", widthHash, "HASH", "COUNT", "CONTEXTS")
+	fmt.Fprintf(w, "%-*s  %-5s  %s\n", widthHash, strings.Repeat("-", widthHash), "-----", "--------")
+	for _, hash := range hashes {
+		contexts := append([]string(nil), groups[hash]...)
+		sort.Strings(contexts)
+		fmt.Fprintf(w, "%-*s  %-5d  %s\n", widthHash, hash, len(contexts), strings.Join(contexts, ","))
 	}
 }
 
@@ -1298,9 +1742,16 @@ func oneLine(text string) string {
 	return compact(strings.Join(splitOutputLines(text), " "), 160)
 }
 
+func fit(text string, max int) string {
+	return compact(text, max)
+}
+
 func compact(text string, max int) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if max > 0 && len(text) > max {
+		if max <= 3 {
+			return text[:max]
+		}
 		return text[:max-3] + "..."
 	}
 	return text
