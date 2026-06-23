@@ -565,7 +565,7 @@ Usage:
   kx ctx tag <context> key=value [key=value...]
   kx history
   kx why <resource> [-n namespace] [--deep]
-  kx matrix [resource] [-n namespace] [--resources deployments,pods] [--cols context,ready,image]
+  kx matrix [resource] [-n namespace] [--resources deployments,pods] [--cols kind-aware,fields]
   kx diff <resource> [-n namespace]
   kx logs <resource> [-n namespace] [--grep pattern]
   kx events [-n namespace] [--warnings]
@@ -596,6 +596,7 @@ Examples:
   kx @prod --parallel 4 get deploy -n payments
   kx @prod why deploy/api -n payments --deep
   kx @prod matrix -n payments
+  kx @prod matrix svc -n payments
   kx @prod matrix deploy/api -n payments --cols context,ready,image,rollout
   kx @prod logs deploy/api -n payments --since 15m --grep error
   kx @env=prod --dry-run delete pod old-api -n payments

@@ -28,18 +28,47 @@ import (
 type kubeAny map[string]any
 
 type objectSummary struct {
-	Context   string
-	Kind      string
-	Name      string
-	Namespace string
-	Status    string
-	Ready     string
-	Image     string
-	Replicas  string
-	Rollout   string
-	Age       string
-	Warnings  string
-	Hash      string
+	Context      string
+	Kind         string
+	Name         string
+	Namespace    string
+	Status       string
+	Ready        string
+	Image        string
+	Replicas     string
+	Rollout      string
+	Age          string
+	Warnings     string
+	Hash         string
+	Type         string
+	ClusterIP    string
+	ExternalIP   string
+	Ports        string
+	Selector     string
+	Endpoints    string
+	Node         string
+	PodIP        string
+	Restarts     string
+	Class        string
+	Hosts        string
+	Address      string
+	Schedule     string
+	Suspend      string
+	LastSchedule string
+	Completions  string
+	Succeeded    string
+	Failed       string
+	Active       string
+	Roles        string
+	Version      string
+	InternalIP   string
+	Capacity     string
+	AccessModes  string
+	Volume       string
+	StorageClass string
+	Data         string
+	Detail       string
+	Network      string
 }
 
 type eventRow struct {
@@ -80,12 +109,19 @@ func whyOne(kubectlPath, contextName string, args []string, deep bool) (string, 
 		return strings.TrimSpace(stderr) + "\n", 1
 	}
 	s := summarizeObject(contextName, obj)
+	if s.Kind == "Service" {
+		s.Endpoints = serviceEndpointSummary(kubectlPath, contextName, s.Namespace, s.Name)
+		s.Detail = detailString(s)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "target: %s/%s", strings.ToLower(s.Kind), s.Name)
 	if s.Namespace != "" {
 		fmt.Fprintf(&b, " namespace=%s", s.Namespace)
 	}
-	fmt.Fprintf(&b, "\nready: %s\nimage: %s\nreplicas: %s\nage: %s\n", dash(s.Ready), dash(s.Image), dash(s.Replicas), dash(s.Age))
+	fmt.Fprintln(&b)
+	for _, fact := range summaryFacts(s) {
+		fmt.Fprintf(&b, "%s: %s\n", fact[0], dash(fact[1]))
+	}
 
 	if len(objectConditions(obj)) > 0 {
 		fmt.Fprintln(&b, "conditions:")
@@ -141,11 +177,7 @@ func runMatrixCommand(opts globalOptions, args []string, stdout io.Writer, stder
 	resourcesValue, args := removeValueFlag(args, "--resources")
 	namespaceMode := matrixNamespaceMode(args)
 	if colsValue == "" {
-		if namespaceMode {
-			colsValue = "context,namespace,kind,name,status,ready,replicas,age,image"
-		} else {
-			colsValue = "context,namespace,kind,name,status,ready,image,replicas,rollout,age"
-		}
+		colsValue = defaultMatrixColumns(args, namespaceMode)
 	}
 	cols := splitCSV(colsValue)
 	if len(args) == 0 && !namespaceMode {
@@ -166,16 +198,14 @@ func runMatrixCommand(opts globalOptions, args []string, stdout io.Writer, stder
 		var stderr string
 		var failed bool
 		if namespaceMode {
-			local, stderr, failed = namespaceMatrixRows(kubectlPath, ctx.Name, args, splitCSV(defaultIfEmpty(resourcesValue, namespaceMatrixResources)), needsColumn(cols, "rollout"))
+			local, stderr, failed = namespaceMatrixRows(kubectlPath, ctx.Name, args, splitCSV(defaultIfEmpty(resourcesValue, namespaceMatrixResources)), cols)
 		} else {
 			obj, errOut, err := getObject(kubectlPath, ctx.Name, args)
 			if err != nil {
 				return history.Result{Context: ctx.Name, ExitCode: 1, Stderr: errOut, Duration: time.Since(started)}
 			}
 			local = summarizeObjects(ctx.Name, obj)
-			if needsColumn(cols, "rollout") {
-				attachRolloutStatus(kubectlPath, ctx.Name, args, obj, local)
-			}
+			enrichMatrixRows(kubectlPath, ctx.Name, args, obj, local, cols)
 		}
 		mu.Lock()
 		rows = append(rows, local...)
@@ -238,7 +268,101 @@ func matrixNamespaceMode(args []string) bool {
 	return true
 }
 
-func namespaceMatrixRows(kubectlPath, contextName string, args []string, resources []string, includeRollout bool) ([]objectSummary, string, bool) {
+func defaultMatrixColumns(args []string, namespaceMode bool) string {
+	if namespaceMode {
+		return strings.Join([]string{"context", "namespace", "kind", "name", "status", "detail", "network", "endpoints", "age"}, ",")
+	}
+	return strings.Join(matrixColumnsForKind(matrixTargetKind(args)), ",")
+}
+
+func matrixTargetKind(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-n" || arg == "--namespace" || arg == "-l" || arg == "--selector" || arg == "--field-selector":
+			i++
+		case strings.HasPrefix(arg, "-"):
+			continue
+		default:
+			return normalizeResourceKind(arg)
+		}
+	}
+	return ""
+}
+
+func normalizeResourceKind(resource string) string {
+	resource = strings.ToLower(strings.TrimSpace(resource))
+	if resource == "" {
+		return ""
+	}
+	resource = strings.SplitN(resource, "/", 2)[0]
+	resource = strings.SplitN(resource, ".", 2)[0]
+	switch resource {
+	case "deploy", "deployment", "deployments":
+		return "Deployment"
+	case "sts", "statefulset", "statefulsets":
+		return "StatefulSet"
+	case "ds", "daemonset", "daemonsets":
+		return "DaemonSet"
+	case "rs", "replicaset", "replicasets":
+		return "ReplicaSet"
+	case "po", "pod", "pods":
+		return "Pod"
+	case "svc", "service", "services":
+		return "Service"
+	case "ing", "ingress", "ingresses":
+		return "Ingress"
+	case "job", "jobs":
+		return "Job"
+	case "cj", "cronjob", "cronjobs":
+		return "CronJob"
+	case "no", "node", "nodes":
+		return "Node"
+	case "ns", "namespace", "namespaces":
+		return "Namespace"
+	case "pvc", "persistentvolumeclaim", "persistentvolumeclaims":
+		return "PersistentVolumeClaim"
+	case "pv", "persistentvolume", "persistentvolumes":
+		return "PersistentVolume"
+	case "cm", "configmap", "configmaps":
+		return "ConfigMap"
+	case "secret", "secrets":
+		return "Secret"
+	default:
+		return ""
+	}
+}
+
+func matrixColumnsForKind(kind string) []string {
+	switch kind {
+	case "Service":
+		return []string{"context", "namespace", "name", "type", "cluster-ip", "external-ip", "ports", "endpoints", "selector", "age"}
+	case "Pod":
+		return []string{"context", "namespace", "name", "status", "ready", "restarts", "pod-ip", "node", "image", "age"}
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
+		return []string{"context", "namespace", "kind", "name", "status", "ready", "replicas", "image", "rollout", "age"}
+	case "Ingress":
+		return []string{"context", "namespace", "name", "class", "hosts", "address", "ports", "status", "age"}
+	case "Job":
+		return []string{"context", "namespace", "name", "status", "completions", "succeeded", "failed", "age"}
+	case "CronJob":
+		return []string{"context", "namespace", "name", "status", "schedule", "suspend", "active", "last-schedule", "age"}
+	case "Node":
+		return []string{"context", "name", "status", "roles", "internal-ip", "version", "age"}
+	case "Namespace":
+		return []string{"context", "name", "status", "age"}
+	case "PersistentVolumeClaim":
+		return []string{"context", "namespace", "name", "status", "volume", "capacity", "access-modes", "storageclass", "age"}
+	case "PersistentVolume":
+		return []string{"context", "name", "status", "capacity", "access-modes", "storageclass", "age"}
+	case "ConfigMap", "Secret":
+		return []string{"context", "namespace", "name", "data", "age"}
+	default:
+		return []string{"context", "namespace", "kind", "name", "status", "detail", "age"}
+	}
+}
+
+func namespaceMatrixRows(kubectlPath, contextName string, args []string, resources []string, cols []string) ([]objectSummary, string, bool) {
 	var rows []objectSummary
 	var hardErrors []string
 	for _, resource := range resources {
@@ -251,9 +375,7 @@ func namespaceMatrixRows(kubectlPath, contextName string, args []string, resourc
 			continue
 		}
 		local := summarizeObjects(contextName, obj)
-		if includeRollout {
-			attachRolloutStatus(kubectlPath, contextName, args, obj, local)
-		}
+		enrichMatrixRows(kubectlPath, contextName, args, obj, local, cols)
 		rows = append(rows, local...)
 	}
 	if len(hardErrors) > 0 {
@@ -268,6 +390,15 @@ func ignorableMatrixError(text string) bool {
 		strings.Contains(text, "no matches for kind")
 }
 
+func enrichMatrixRows(kubectlPath, contextName string, args []string, obj kubeAny, rows []objectSummary, cols []string) {
+	if needsColumn(cols, "rollout") {
+		attachRolloutStatus(kubectlPath, contextName, args, obj, rows)
+	}
+	if needsColumn(cols, "endpoints") {
+		attachServiceEndpoints(kubectlPath, contextName, rows)
+	}
+}
+
 func attachRolloutStatus(kubectlPath, contextName string, args []string, obj kubeAny, rows []objectSummary) {
 	for i := range rows {
 		if target := rolloutResource(objectAt(obj, i)); target != "" {
@@ -276,6 +407,16 @@ func attachRolloutStatus(kubectlPath, contextName string, args []string, obj kub
 				rows[i].Rollout = oneLine(out)
 			}
 		}
+	}
+}
+
+func attachServiceEndpoints(kubectlPath, contextName string, rows []objectSummary) {
+	for i := range rows {
+		if rows[i].Kind != "Service" || rows[i].Name == "" {
+			continue
+		}
+		rows[i].Endpoints = serviceEndpointSummary(kubectlPath, contextName, rows[i].Namespace, rows[i].Name)
+		rows[i].Detail = detailString(rows[i])
 	}
 }
 
@@ -858,6 +999,32 @@ func summarizeObject(contextName string, obj kubeAny) objectSummary {
 	if row.Kind == "" {
 		row.Kind = "Object"
 	}
+	row.Type = typeString(obj)
+	row.ClusterIP = serviceClusterIP(spec)
+	row.ExternalIP = externalAddress(obj)
+	row.Ports = portsString(obj)
+	row.Selector = selectorString(spec["selector"])
+	row.Node = stringValue(spec, "nodeName")
+	row.PodIP = stringValue(status, "podIP")
+	row.Restarts = restartString(status)
+	row.Class = ingressClass(obj)
+	row.Hosts = ingressHosts(spec)
+	row.Address = ingressAddress(obj)
+	row.Schedule = stringValue(spec, "schedule")
+	row.Suspend = boolString(spec["suspend"])
+	row.LastSchedule = ageString(stringValue(status, "lastScheduleTime"))
+	row.Completions = completionsString(spec, status)
+	row.Succeeded = intish(status["succeeded"])
+	row.Failed = intish(status["failed"])
+	row.Active = activeString(status)
+	row.Roles = nodeRoles(meta)
+	row.Version = nodeVersion(status)
+	row.InternalIP = nodeInternalIP(status)
+	row.Capacity = capacityString(obj)
+	row.AccessModes = accessModesString(spec)
+	row.Volume = stringValue(spec, "volumeName")
+	row.StorageClass = storageClassString(spec)
+	row.Data = dataCountString(obj)
 	replicas := intish(spec["replicas"])
 	readyReplicas := intish(status["readyReplicas"])
 	if replicas != "" || readyReplicas != "" {
@@ -868,11 +1035,16 @@ func summarizeObject(contextName string, obj kubeAny) objectSummary {
 		row.Replicas = defaultIfEmpty(intish(status["numberReady"]), "0") + "/" + defaultIfEmpty(intish(status["desiredNumberScheduled"]), "?")
 	case "Job":
 		row.Replicas = defaultIfEmpty(intish(status["succeeded"]), "0") + "/" + defaultIfEmpty(intish(spec["completions"]), "?")
+		row.Succeeded = defaultIfEmpty(row.Succeeded, "0")
+		row.Failed = defaultIfEmpty(row.Failed, "0")
 	case "CronJob":
+		row.Active = defaultIfEmpty(row.Active, "0")
 		if active := activeCount(status); active > 0 {
 			row.Replicas = fmt.Sprintf("%d active", active)
 		}
 	}
+	row.Detail = detailString(row)
+	row.Network = networkString(row)
 	return row
 }
 
@@ -935,6 +1107,357 @@ func intValue(m map[string]any, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func typeString(obj kubeAny) string {
+	kind := stringValue(obj, "kind")
+	spec := mapValue(obj, "spec")
+	switch kind {
+	case "Service":
+		return defaultIfEmpty(stringValue(spec, "type"), "ClusterIP")
+	case "Secret":
+		return stringValue(obj, "type")
+	default:
+		return ""
+	}
+}
+
+func serviceClusterIP(spec map[string]any) string {
+	if clusterIP := stringValue(spec, "clusterIP"); clusterIP != "" {
+		return clusterIP
+	}
+	return ""
+}
+
+func externalAddress(obj kubeAny) string {
+	kind := stringValue(obj, "kind")
+	spec := mapValue(obj, "spec")
+	switch kind {
+	case "Service":
+		if externalName := stringValue(spec, "externalName"); externalName != "" {
+			return externalName
+		}
+		values := listStrings(spec["externalIPs"])
+		values = append(values, loadBalancerAddresses(mapValue(obj, "status"))...)
+		return strings.Join(uniqueStrings(values), ",")
+	case "Ingress":
+		return ingressAddress(obj)
+	default:
+		return ""
+	}
+}
+
+func loadBalancerAddresses(status map[string]any) []string {
+	lb := mapValue(status, "loadBalancer")
+	ingress, ok := lb["ingress"].([]any)
+	if !ok {
+		return nil
+	}
+	var values []string
+	for _, item := range ingress {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if ip := stringValue(m, "ip"); ip != "" {
+			values = append(values, ip)
+		}
+		if hostname := stringValue(m, "hostname"); hostname != "" {
+			values = append(values, hostname)
+		}
+	}
+	return values
+}
+
+func portsString(obj kubeAny) string {
+	kind := stringValue(obj, "kind")
+	spec := mapValue(obj, "spec")
+	switch kind {
+	case "Service":
+		ports, ok := spec["ports"].([]any)
+		if !ok {
+			return ""
+		}
+		var values []string
+		for _, item := range ports {
+			port, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			value := intish(port["port"])
+			if targetPort := intish(port["targetPort"]); targetPort != "" && targetPort != value {
+				value += "->" + targetPort
+			}
+			if nodePort := intish(port["nodePort"]); nodePort != "" {
+				value += ":" + nodePort
+			}
+			if protocol := stringValue(port, "protocol"); protocol != "" {
+				value += "/" + protocol
+			}
+			if name := stringValue(port, "name"); name != "" {
+				value = name + "=" + value
+			}
+			values = append(values, value)
+		}
+		return strings.Join(values, ",")
+	case "Ingress":
+		if tls, ok := spec["tls"].([]any); ok && len(tls) > 0 {
+			return "80,443"
+		}
+		return "80"
+	default:
+		return ""
+	}
+}
+
+func selectorString(value any) string {
+	selector, ok := value.(map[string]any)
+	if !ok || len(selector) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(selector))
+	for key := range selector {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		values = append(values, key+"="+fmt.Sprint(selector[key]))
+	}
+	return strings.Join(values, ",")
+}
+
+func restartString(status map[string]any) string {
+	restarts := 0
+	seen := false
+	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
+		statuses, ok := status[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range statuses {
+			container, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if count, ok := intValue(container, "restartCount"); ok {
+				restarts += count
+				seen = true
+			}
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return strconv.Itoa(restarts)
+}
+
+func ingressClass(obj kubeAny) string {
+	spec := mapValue(obj, "spec")
+	if className := stringValue(spec, "ingressClassName"); className != "" {
+		return className
+	}
+	meta := mapValue(obj, "metadata")
+	annotations := mapValue(meta, "annotations")
+	return stringValue(annotations, "kubernetes.io/ingress.class")
+}
+
+func ingressHosts(spec map[string]any) string {
+	rules, ok := spec["rules"].([]any)
+	if !ok || len(rules) == 0 {
+		return ""
+	}
+	var hosts []string
+	for _, item := range rules {
+		rule, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		hosts = append(hosts, defaultIfEmpty(stringValue(rule, "host"), "*"))
+	}
+	return strings.Join(uniqueStrings(hosts), ",")
+}
+
+func ingressAddress(obj kubeAny) string {
+	return strings.Join(loadBalancerAddresses(mapValue(obj, "status")), ",")
+}
+
+func boolString(value any) string {
+	if b, ok := value.(bool); ok {
+		if b {
+			return "true"
+		}
+		return "false"
+	}
+	return ""
+}
+
+func completionsString(spec map[string]any, status map[string]any) string {
+	succeededValue := intish(status["succeeded"])
+	completionsValue := intish(spec["completions"])
+	if succeededValue == "" && completionsValue == "" {
+		return ""
+	}
+	succeeded := defaultIfEmpty(succeededValue, "0")
+	completions := defaultIfEmpty(completionsValue, "?")
+	return succeeded + "/" + completions
+}
+
+func activeString(status map[string]any) string {
+	if active, ok := intValue(status, "active"); ok {
+		return strconv.Itoa(active)
+	}
+	if active := activeCount(status); active > 0 {
+		return strconv.Itoa(active)
+	}
+	return ""
+}
+
+func nodeRoles(meta map[string]any) string {
+	labels := mapValue(meta, "labels")
+	var roles []string
+	for key, value := range labels {
+		if strings.HasPrefix(key, "node-role.kubernetes.io/") {
+			role := strings.TrimPrefix(key, "node-role.kubernetes.io/")
+			if role == "" {
+				role = fmt.Sprint(value)
+			}
+			roles = append(roles, role)
+		}
+	}
+	if role := stringValue(labels, "kubernetes.io/role"); role != "" {
+		roles = append(roles, role)
+	}
+	if len(roles) == 0 {
+		return "<none>"
+	}
+	sort.Strings(roles)
+	return strings.Join(uniqueStrings(roles), ",")
+}
+
+func nodeVersion(status map[string]any) string {
+	nodeInfo := mapValue(status, "nodeInfo")
+	return stringValue(nodeInfo, "kubeletVersion")
+}
+
+func nodeInternalIP(status map[string]any) string {
+	addresses, ok := status["addresses"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, item := range addresses {
+		address, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringValue(address, "type") == "InternalIP" {
+			return stringValue(address, "address")
+		}
+	}
+	return ""
+}
+
+func capacityString(obj kubeAny) string {
+	status := mapValue(obj, "status")
+	if capacity := mapValue(status, "capacity"); len(capacity) > 0 {
+		if storage := stringValue(capacity, "storage"); storage != "" {
+			return storage
+		}
+	}
+	spec := mapValue(obj, "spec")
+	if capacity := mapValue(spec, "capacity"); len(capacity) > 0 {
+		return stringValue(capacity, "storage")
+	}
+	return ""
+}
+
+func accessModesString(spec map[string]any) string {
+	return strings.Join(listStrings(spec["accessModes"]), ",")
+}
+
+func storageClassString(spec map[string]any) string {
+	return stringValue(spec, "storageClassName")
+}
+
+func dataCountString(obj kubeAny) string {
+	count := 0
+	if data, ok := obj["data"].(map[string]any); ok {
+		count += len(data)
+	}
+	if data, ok := obj["binaryData"].(map[string]any); ok {
+		count += len(data)
+	}
+	if count == 0 {
+		return ""
+	}
+	return strconv.Itoa(count)
+}
+
+func detailString(row objectSummary) string {
+	switch row.Kind {
+	case "Service":
+		return strings.Join(nonEmpty(row.Type, row.ClusterIP, row.Ports), " ")
+	case "Pod":
+		return strings.Join(nonEmpty("ready="+dash(row.Ready), "restarts="+dash(row.Restarts)), " ")
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
+		return strings.Join(nonEmpty("ready="+dash(row.Ready), "replicas="+dash(row.Replicas)), " ")
+	case "Ingress":
+		return strings.Join(nonEmpty("class="+dash(row.Class), "hosts="+dash(row.Hosts)), " ")
+	case "Job":
+		return strings.Join(nonEmpty("complete="+dash(row.Completions), "failed="+dash(row.Failed)), " ")
+	case "CronJob":
+		return strings.Join(nonEmpty(row.Schedule, "suspend="+dash(row.Suspend)), " ")
+	case "Node":
+		return strings.Join(nonEmpty(row.Roles, row.Version), " ")
+	case "PersistentVolumeClaim", "PersistentVolume":
+		return strings.Join(nonEmpty(row.Capacity, row.AccessModes, row.StorageClass), " ")
+	case "ConfigMap", "Secret":
+		if row.Data == "" {
+			return ""
+		}
+		return row.Data + " keys"
+	default:
+		return strings.Join(nonEmpty(row.Ready, row.Replicas, row.Type), " ")
+	}
+}
+
+func networkString(row objectSummary) string {
+	switch row.Kind {
+	case "Service":
+		return defaultIfEmpty(row.ExternalIP, row.ClusterIP)
+	case "Pod":
+		return strings.Join(nonEmpty(row.PodIP, row.Node), " ")
+	case "Ingress":
+		return row.Address
+	case "Node":
+		return row.InternalIP
+	default:
+		return ""
+	}
+}
+
+func nonEmpty(values ...string) []string {
+	var out []string
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" && value != "-" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func listStrings(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	var values []string
+	for _, item := range items {
+		if s, ok := item.(string); ok && s != "" {
+			values = append(values, s)
+		}
+	}
+	return values
 }
 
 func imagesFromObject(obj kubeAny) []string {
@@ -1063,7 +1586,14 @@ func statusString(obj kubeAny) string {
 		}
 		return "Idle"
 	case "Service":
-		return defaultIfEmpty(stringValue(spec, "type"), "Service")
+		serviceType := defaultIfEmpty(stringValue(spec, "type"), "ClusterIP")
+		if serviceType == "LoadBalancer" {
+			if externalAddress(obj) != "" {
+				return "Exposed"
+			}
+			return "PendingLB"
+		}
+		return serviceType
 	case "Ingress":
 		lb := mapValue(status, "loadBalancer")
 		if ingress, ok := lb["ingress"].([]any); ok && len(ingress) > 0 {
@@ -1215,6 +1745,101 @@ func warningEvents(kubectlPath, contextName string, obj kubeAny, nsArgs []string
 		return ""
 	}
 	return out
+}
+
+func serviceEndpointSummary(kubectlPath, contextName string, namespace string, serviceName string) string {
+	args := append([]string{"get", "endpointslices.discovery.k8s.io", "-l", "kubernetes.io/service-name=" + serviceName, "-o", "json"}, endpointNamespaceArgs(namespace)...)
+	out, _, code := runKubectlCapture(kubectlPath, contextName, args, 15*time.Second)
+	if code == 0 {
+		var root kubeAny
+		if err := json.Unmarshal([]byte(out), &root); err == nil {
+			ready, total := endpointSummaryFromSlices(root)
+			return formatEndpointSummary(ready, total)
+		}
+	}
+
+	args = append([]string{"get", "endpoints", serviceName, "-o", "json"}, endpointNamespaceArgs(namespace)...)
+	out, _, code = runKubectlCapture(kubectlPath, contextName, args, 15*time.Second)
+	if code != 0 {
+		return "-"
+	}
+	var root kubeAny
+	if err := json.Unmarshal([]byte(out), &root); err != nil {
+		return "-"
+	}
+	ready, total := endpointSummaryFromEndpoints(root)
+	return formatEndpointSummary(ready, total)
+}
+
+func endpointNamespaceArgs(namespace string) []string {
+	if namespace == "" {
+		return nil
+	}
+	return []string{"-n", namespace}
+}
+
+func endpointSummaryFromSlices(root kubeAny) (int, int) {
+	items, ok := root["items"].([]any)
+	if !ok {
+		return 0, 0
+	}
+	ready := 0
+	total := 0
+	for _, item := range items {
+		slice, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		endpoints, ok := slice["endpoints"].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range endpoints {
+			endpoint, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			addresses := listStrings(endpoint["addresses"])
+			count := len(addresses)
+			if count == 0 {
+				count = 1
+			}
+			total += count
+			conditions := mapValue(endpoint, "conditions")
+			if readyValue, ok := conditions["ready"].(bool); ok && !readyValue {
+				continue
+			}
+			ready += count
+		}
+	}
+	return ready, total
+}
+
+func endpointSummaryFromEndpoints(root kubeAny) (int, int) {
+	subsets, ok := root["subsets"].([]any)
+	if !ok {
+		return 0, 0
+	}
+	ready := 0
+	total := 0
+	for _, item := range subsets {
+		subset, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		readyAddresses, _ := subset["addresses"].([]any)
+		notReadyAddresses, _ := subset["notReadyAddresses"].([]any)
+		ready += len(readyAddresses)
+		total += len(readyAddresses) + len(notReadyAddresses)
+	}
+	return ready, total
+}
+
+func formatEndpointSummary(ready int, total int) string {
+	if total == 0 {
+		return "0/0"
+	}
+	return fmt.Sprintf("%d/%d", ready, total)
 }
 
 func loadEvents(kubectlPath, contextName string, args []string, warnings bool, since time.Duration, limit int) ([]eventRow, string) {
@@ -1412,6 +2037,26 @@ func matrixColumnLimit(col string) int {
 		return 28
 	case "image":
 		return 64
+	case "type":
+		return 18
+	case "cluster-ip", "external-ip", "pod-ip", "internal-ip", "address", "network":
+		return 40
+	case "ports":
+		return 42
+	case "selector":
+		return 56
+	case "endpoints":
+		return 12
+	case "node", "class", "roles", "version", "volume", "storageclass":
+		return 34
+	case "hosts":
+		return 56
+	case "schedule":
+		return 32
+	case "last-schedule", "access-modes", "capacity", "completions", "succeeded", "failed", "active", "suspend", "restarts", "data":
+		return 18
+	case "detail":
+		return 64
 	case "rollout":
 		return 72
 	case "warnings":
@@ -1425,19 +2070,145 @@ func matrixColumnLimit(col string) int {
 
 func summaryValues(row objectSummary) map[string]string {
 	return map[string]string{
-		"context":   row.Context,
-		"kind":      row.Kind,
-		"name":      row.Name,
-		"namespace": row.Namespace,
-		"status":    row.Status,
-		"ready":     row.Ready,
-		"image":     row.Image,
-		"replicas":  row.Replicas,
-		"rollout":   row.Rollout,
-		"age":       row.Age,
-		"warnings":  row.Warnings,
-		"hash":      row.Hash,
+		"context":       row.Context,
+		"kind":          row.Kind,
+		"name":          row.Name,
+		"namespace":     row.Namespace,
+		"status":        row.Status,
+		"ready":         row.Ready,
+		"image":         row.Image,
+		"replicas":      row.Replicas,
+		"rollout":       row.Rollout,
+		"age":           row.Age,
+		"warnings":      row.Warnings,
+		"hash":          row.Hash,
+		"type":          row.Type,
+		"cluster-ip":    row.ClusterIP,
+		"external-ip":   row.ExternalIP,
+		"ports":         row.Ports,
+		"selector":      row.Selector,
+		"endpoints":     row.Endpoints,
+		"node":          row.Node,
+		"pod-ip":        row.PodIP,
+		"restarts":      row.Restarts,
+		"class":         row.Class,
+		"hosts":         row.Hosts,
+		"address":       row.Address,
+		"schedule":      row.Schedule,
+		"suspend":       row.Suspend,
+		"last-schedule": row.LastSchedule,
+		"completions":   row.Completions,
+		"succeeded":     row.Succeeded,
+		"failed":        row.Failed,
+		"active":        row.Active,
+		"roles":         row.Roles,
+		"version":       row.Version,
+		"internal-ip":   row.InternalIP,
+		"capacity":      row.Capacity,
+		"access-modes":  row.AccessModes,
+		"volume":        row.Volume,
+		"storageclass":  row.StorageClass,
+		"data":          row.Data,
+		"detail":        row.Detail,
+		"network":       row.Network,
 	}
+}
+
+func summaryFacts(row objectSummary) [][2]string {
+	switch row.Kind {
+	case "Service":
+		return factPairs(
+			"type", row.Type,
+			"status", row.Status,
+			"cluster-ip", row.ClusterIP,
+			"external-ip", row.ExternalIP,
+			"ports", row.Ports,
+			"selector", row.Selector,
+			"endpoints", row.Endpoints,
+			"age", row.Age,
+		)
+	case "Pod":
+		return factPairs(
+			"status", row.Status,
+			"ready", row.Ready,
+			"restarts", row.Restarts,
+			"pod-ip", row.PodIP,
+			"node", row.Node,
+			"image", row.Image,
+			"age", row.Age,
+		)
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
+		return factPairs(
+			"status", row.Status,
+			"ready", row.Ready,
+			"replicas", row.Replicas,
+			"image", row.Image,
+			"age", row.Age,
+		)
+	case "Ingress":
+		return factPairs(
+			"status", row.Status,
+			"class", row.Class,
+			"hosts", row.Hosts,
+			"address", row.Address,
+			"ports", row.Ports,
+			"age", row.Age,
+		)
+	case "Job":
+		return factPairs(
+			"status", row.Status,
+			"completions", row.Completions,
+			"succeeded", row.Succeeded,
+			"failed", row.Failed,
+			"age", row.Age,
+		)
+	case "CronJob":
+		return factPairs(
+			"status", row.Status,
+			"schedule", row.Schedule,
+			"suspend", row.Suspend,
+			"active", row.Active,
+			"last-schedule", row.LastSchedule,
+			"age", row.Age,
+		)
+	case "Node":
+		return factPairs(
+			"status", row.Status,
+			"roles", row.Roles,
+			"internal-ip", row.InternalIP,
+			"version", row.Version,
+			"age", row.Age,
+		)
+	case "PersistentVolumeClaim", "PersistentVolume":
+		return factPairs(
+			"status", row.Status,
+			"volume", row.Volume,
+			"capacity", row.Capacity,
+			"access-modes", row.AccessModes,
+			"storageclass", row.StorageClass,
+			"age", row.Age,
+		)
+	case "ConfigMap", "Secret":
+		return factPairs("data", row.Data, "age", row.Age)
+	default:
+		return factPairs(
+			"status", row.Status,
+			"ready", row.Ready,
+			"detail", row.Detail,
+			"age", row.Age,
+		)
+	}
+}
+
+func factPairs(values ...string) [][2]string {
+	var facts [][2]string
+	for i := 0; i+1 < len(values); i += 2 {
+		if strings.TrimSpace(values[i+1]) == "" {
+			continue
+		}
+		facts = append(facts, [2]string{values[i], values[i+1]})
+	}
+	return facts
 }
 
 func printGroupedSpecial(w io.Writer, label string, results []history.Result) {

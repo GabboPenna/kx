@@ -117,6 +117,79 @@ func TestPrintMatrixHasHeaderAndFitsLongCells(t *testing.T) {
 	}
 }
 
+func TestDefaultMatrixColumnsAreServiceAware(t *testing.T) {
+	cols := splitCSV(defaultMatrixColumns([]string{"svc", "-n", "payments"}, false))
+	for _, want := range []string{"type", "cluster-ip", "external-ip", "ports", "endpoints", "selector"} {
+		if !needsColumn(cols, want) {
+			t.Fatalf("service matrix columns missing %q: %#v", want, cols)
+		}
+	}
+	for _, unwanted := range []string{"ready", "image", "replicas", "rollout"} {
+		if needsColumn(cols, unwanted) {
+			t.Fatalf("service matrix columns should not contain %q: %#v", unwanted, cols)
+		}
+	}
+}
+
+func TestSummarizeServiceKindAwareFields(t *testing.T) {
+	obj := kubeAny{
+		"kind": "Service",
+		"metadata": map[string]any{
+			"name":      "api",
+			"namespace": "payments",
+		},
+		"spec": map[string]any{
+			"type":      "LoadBalancer",
+			"clusterIP": "10.0.0.42",
+			"selector":  map[string]any{"app": "api"},
+			"ports": []any{
+				map[string]any{"name": "http", "port": float64(80), "protocol": "TCP"},
+			},
+		},
+		"status": map[string]any{
+			"loadBalancer": map[string]any{
+				"ingress": []any{map[string]any{"ip": "35.1.2.3"}},
+			},
+		},
+	}
+	row := summarizeObject("prod", obj)
+	if row.Type != "LoadBalancer" || row.Status != "Exposed" || row.ClusterIP != "10.0.0.42" || row.ExternalIP != "35.1.2.3" {
+		t.Fatalf("unexpected service summary: %#v", row)
+	}
+	if row.Ports != "http=80/TCP" || row.Selector != "app=api" {
+		t.Fatalf("unexpected service ports/selector: %#v", row)
+	}
+	facts := summaryFacts(row)
+	for _, fact := range facts {
+		if fact[0] == "image" || fact[0] == "replicas" || fact[0] == "ready" {
+			t.Fatalf("service facts should be kind-aware, got %#v", facts)
+		}
+	}
+}
+
+func TestEndpointSummaryFromSlicesCountsReadyAddresses(t *testing.T) {
+	root := kubeAny{
+		"items": []any{
+			map[string]any{
+				"endpoints": []any{
+					map[string]any{
+						"addresses":  []any{"10.2.0.1", "10.2.0.2"},
+						"conditions": map[string]any{"ready": true},
+					},
+					map[string]any{
+						"addresses":  []any{"10.2.0.3"},
+						"conditions": map[string]any{"ready": false},
+					},
+				},
+			},
+		},
+	}
+	ready, total := endpointSummaryFromSlices(root)
+	if ready != 2 || total != 3 {
+		t.Fatalf("endpointSummaryFromSlices() = %d/%d, want 2/3", ready, total)
+	}
+}
+
 func TestStatusStringPodWaitingReason(t *testing.T) {
 	obj := kubeAny{
 		"kind": "Pod",

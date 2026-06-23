@@ -54,7 +54,7 @@ kx --version
 Pinned release with checksum verification:
 
 ```bash
-version="v0.2.1"
+version="v0.3.0"
 base="https://github.com/GabboPenna/kx/releases/download/$version"
 
 curl -fsSLO "$base/kx-linux-amd64.tar.gz"
@@ -129,11 +129,12 @@ kx @prod --canary 1 rollout restart deploy/api -n payments
 ### why
 
 `why` is the "tell me what hurts" command. It gathers the resource JSON,
-readiness, images, replicas, conditions, owner chain, rollout status, warning
-events, and optional deep describe/log detail.
+kind-aware facts, conditions, owner chain, rollout status, warning events, and
+optional deep describe/log detail.
 
 ```bash
 kx why pod/api-6b7df8 -n payments
+kx why svc/api -n payments
 kx @prod why deploy/api -n payments
 kx @prod why deploy/api -n payments --deep
 ```
@@ -166,12 +167,27 @@ acting cursed at 02:00.
 Resource mode compares one target across contexts:
 
 ```bash
+kx @prod matrix svc -n payments
 kx @prod matrix deploy/api -n payments
 kx @prod matrix deploy/api -n payments --cols context,ready,image,replicas,rollout
 ```
 
-Namespace mode scans a whole namespace and prints a compact inventory with
-`STATUS`, `READY`, `REPLICAS`, `AGE`, and images:
+Matrix output is kind-aware by default:
+
+```text
+svc       -> TYPE, CLUSTER-IP, EXTERNAL-IP, PORTS, ENDPOINTS, SELECTOR
+pod       -> STATUS, READY, RESTARTS, POD-IP, NODE, IMAGE
+deploy    -> STATUS, READY, REPLICAS, IMAGE, ROLLOUT
+ingress   -> CLASS, HOSTS, ADDRESS, PORTS, STATUS
+job       -> STATUS, COMPLETIONS, SUCCEEDED, FAILED
+cronjob   -> STATUS, SCHEDULE, SUSPEND, ACTIVE, LAST-SCHEDULE
+pvc/pv    -> STATUS, VOLUME, CAPACITY, ACCESS-MODES, STORAGECLASS
+node      -> STATUS, ROLES, INTERNAL-IP, VERSION
+```
+
+Namespace mode scans a whole namespace and prints a compact inventory using
+generic kind-aware columns: `STATUS`, `DETAIL`, `NETWORK`, `ENDPOINTS`, and
+`AGE`.
 
 ```bash
 kx matrix -n payments
@@ -189,7 +205,8 @@ deployments,statefulsets,daemonsets,pods,services,ingresses,jobs,cronjobs
 Output is intentionally boring in the best possible way: fixed table headers,
 bounded columns, deterministic sorting, and enough status translation to spot
 `ImagePullBackOff`, degraded workloads, suspended CronJobs, pending Ingresses,
-and service types without cracking open another pane.
+pending LoadBalancers, and Services with zero ready endpoints without cracking
+open another pane.
 
 ### diff
 
