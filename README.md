@@ -7,6 +7,8 @@
 compare their state, investigate incidents, and guard risky fan-out without
 changing your current context.
 
+![kx finds a degraded deployment across three Kubernetes contexts](docs/assets/kx-demo.gif)
+
 It does not replace `kubectl` or introduce another Kubernetes API client.
 Ordinary commands pass through unchanged; fleet behavior starts only when you
 add an explicit `@selector`.
