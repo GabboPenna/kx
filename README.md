@@ -1,13 +1,15 @@
 # kx
 
-`kx` is kubectl with context algebra.
+**One kubectl workflow across every cluster.**
 
-It is for Linux people with more than one cluster, too many namespaces, a
-terminal full of muscle memory, and exactly zero patience for "wait, was that
-prod?" moments.
+`kx` is a small, Linux-first operator shell for people who already know
+`kubectl` but work across more than one cluster. Select contexts as a fleet,
+compare their state, investigate incidents, and guard risky fan-out without
+changing your current context.
 
-No dashboard pilgrimage. No kubeconfig superstition. No bash loop graveyard.
-`kubectl` stays the engine. `kx` becomes the operator shell around it.
+It does not replace `kubectl` or introduce another Kubernetes API client.
+Ordinary commands pass through unchanged; fleet behavior starts only when you
+add an explicit `@selector`.
 
 ```bash
 kx get pods -A
@@ -18,9 +20,42 @@ kx @prod logs deploy/api -n payments --since 15m --grep 'error|panic|timeout'
 kx @prod diff deploy/api -n payments
 ```
 
+## A 60-second tour
+
+```bash
+# Verify the local setup and see your contexts.
+kx doctor
+kx ctx ls
+
+# Add local metadata (kx never edits kubeconfig for this).
+kx ctx tag aks-prod-weu env=prod region=eu team=payments risk=high
+
+# Preview exactly what @prod means, then run ordinary kubectl safely.
+kx ctx where @prod
+kx @prod --dry-run get pods -A
+kx @prod get pods -A
+
+# Compare one workload and investigate the unhealthy copy.
+kx @prod matrix deploy/api -n payments
+kx @prod why deploy/api -n payments
+```
+
+Try `kx help matrix`, `kx help selectors`, or any command with `--help`.
+
+## Where it helps
+
+`kubectx` is excellent for switching one active context. `k9s` and dashboards
+are excellent for exploring one cluster interactively. `kx` targets a
+different gap: repeatable, terminal-native questions and actions across a set
+of contexts, with the selected set visible before a mutation runs.
+
+Good fits include platform teams operating regional clusters, staged
+rollouts, incident comparison, configuration drift checks, and fleet-wide RBAC
+audits. If you use only one cluster, plain `kubectl` is usually enough.
+
 ## What kx Does
 
-`kx` treats contexts like a queryable fleet:
+`kx` treats kubeconfig contexts like a queryable fleet:
 
 - selectors: `@prod`, `@prod.eu`, `@env=prod`, `@team:payments`, `@/regex/`
 - context tags that never touch kubeconfig
@@ -296,9 +331,10 @@ The point is constant context awareness without a spaceship prompt framework.
 
 ## Safety
 
-Mutating commands such as `apply`, `delete`, `patch`, `scale`, `rollout restart`,
-`drain`, `cordon`, `label`, and `annotate` trigger confirmation when they target
-multiple contexts or prod-like contexts.
+Mutating commands such as `apply`, `delete`, `patch`, `run`, `expose`, `scale`,
+`rollout restart`, `drain`, `cordon`, `label`, and `annotate` trigger
+confirmation when they target multiple contexts or prod-like contexts. The
+guard also recognizes kubectl global flags placed before the command.
 
 A context is prod-like when:
 

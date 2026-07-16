@@ -1,12 +1,29 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GabboPenna/kx/internal/history"
 )
+
+func TestCommandHelpDoesNotNeedKubectl(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"matrix", "--help"}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "Usage: kx [@selector] matrix") {
+		t.Fatalf("unexpected help result code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestUnknownHelpTopicIsActionable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"help", "wat"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "try: kx help selectors") {
+		t.Fatalf("unexpected help result code=%d stderr=%q", code, stderr.String())
+	}
+}
 
 func TestParseGlobalOptionsStopsAtKubectlCommand(t *testing.T) {
 	opts, rest, err := parseGlobalOptions([]string{"@prod", "--parallel", "4", "apply", "-f", "app.yaml", "--dry-run=server"})

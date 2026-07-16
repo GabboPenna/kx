@@ -56,9 +56,28 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 		printHelp(stdout)
 		return 0
 	}
+	if len(rest) > 1 && wantsHelp(rest[1:]) {
+		topic := strings.ToLower(rest[0])
+		switch topic {
+		case "context", "contexts":
+			topic = "ctx"
+		case "log":
+			topic = "logs"
+		case "event":
+			topic = "events"
+		case "explain":
+			topic = "why"
+		}
+		if _, ok := topicHelp[topic]; ok {
+			printTopicHelp(stdout, topic)
+			return 0
+		}
+	}
 
 	switch rest[0] {
-	case "help", "-h", "--help":
+	case "help":
+		return runHelpCommand(rest[1:], stdout, stderr)
+	case "-h", "--help":
 		printHelp(stdout)
 		return 0
 	case "ctx", "context", "contexts":
@@ -372,6 +391,10 @@ func runOneContext(kubectlPath string, args []string, contextName string, timeou
 }
 
 func runContextCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	if wantsHelp(args) {
+		printTopicHelp(stdout, "ctx")
+		return 0
+	}
 	kubectlPath, err := exec.LookPath("kubectl")
 	if err != nil {
 		fmt.Fprintln(stderr, "kx: kubectl was not found in PATH")
@@ -471,6 +494,10 @@ func runContextCommand(args []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 func runHistoryCommand(args []string, stdout io.Writer, stderr io.Writer) int {
+	if wantsHelp(args) {
+		printTopicHelp(stdout, "history")
+		return 0
+	}
 	if len(args) == 0 || args[0] == "ls" || args[0] == "list" {
 		entries, err := history.LoadRecent(20)
 		if err != nil {
@@ -516,11 +543,32 @@ func runDoctor(stdout io.Writer, stderr io.Writer) int {
 	}
 	dir, _ := store.Dir()
 	fmt.Fprintf(stdout, "kx home: %s\n", dir)
-	if _, err := kube.Load(kubectlPath); err != nil {
+	state, err := kube.Load(kubectlPath)
+	if err != nil {
 		fmt.Fprintln(stderr, "kubeconfig:", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "kubeconfig: ok")
+	fmt.Fprintf(stdout, "kubeconfig: ok (%d contexts)\n", len(state.Contexts))
+	if state.CurrentContext == "" {
+		fmt.Fprintln(stderr, "current context: not set")
+		return 1
+	}
+	fmt.Fprintf(stdout, "current context: %s\n", state.CurrentContext)
+	meta, err := store.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, "metadata:", err)
+		return 1
+	}
+	tagged := 0
+	for name, tags := range meta.ContextTags {
+		if state.HasContext(name) && len(tags) > 0 {
+			tagged++
+		}
+	}
+	fmt.Fprintf(stdout, "kx metadata: ok (%d/%d contexts tagged)\n", tagged, len(state.Contexts))
+	if len(state.Contexts) > 1 && tagged == 0 {
+		fmt.Fprintln(stdout, "tip: tag contexts to make selectors safer (kx help ctx)")
+	}
 	return 0
 }
 
@@ -556,20 +604,27 @@ func hasFailures(results []history.Result) bool {
 }
 
 func printHelp(stdout io.Writer) {
-	fmt.Fprint(stdout, `kx - kubectl with context algebra
+	fmt.Fprint(stdout, `kx - one kubectl workflow across every cluster
 
 Usage:
   kx <kubectl args...>
   kx @selector [kx options] <kubectl args...>
-  kx ctx ls
-  kx ctx tag <context> key=value [key=value...]
-  kx history
-  kx why <resource> [-n namespace] [--deep]
-  kx matrix [resource] [-n namespace] [--resources deployments,pods] [--cols kind-aware,fields]
-  kx diff <resource> [-n namespace]
-  kx logs <resource> [-n namespace] [--grep pattern]
-  kx events [-n namespace] [--warnings]
-  kx access [-n namespace]
+
+Start here:
+  kx doctor             verify kubectl, kubeconfig, and kx metadata
+  kx ctx ls             see contexts and local safety tags
+  kx ctx where @prod    preview a selector before running anything
+  kx @prod get pods -A  run ordinary kubectl across matched contexts
+
+Commands:
+  why       explain an unhealthy resource       matrix    compare fleet state
+  logs      prefix and filter logs by context    events    recent useful events
+  diff      sanitized resource comparison        drift     group equal resources
+  can       check one RBAC permission             access    print an RBAC matrix
+  ctx       list, find, and tag contexts          history   recent fleet runs
+  doctor    check local setup                     completion shell integration
+
+Run "kx help <command>" for examples and options.
 
 Selectors:
   @all                 every context in kubeconfig order

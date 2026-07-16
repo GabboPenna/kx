@@ -63,19 +63,60 @@ func Evaluate(plan Plan) Decision {
 }
 
 func isMutating(args []string) bool {
-	if len(args) == 0 {
+	verb, rest := kubectlVerb(args)
+	if verb == "" {
 		return false
 	}
-	verb := args[0]
 	switch verb {
-	case "apply", "create", "delete", "replace", "patch", "scale", "edit", "cordon", "uncordon", "drain", "taint", "annotate", "label":
+	case "apply", "create", "delete", "replace", "patch", "scale", "autoscale",
+		"edit", "expose", "run", "debug", "cordon", "uncordon", "drain",
+		"taint", "annotate", "label", "config":
 		return true
 	case "rollout":
-		return len(args) > 1 && args[1] != "status" && args[1] != "history"
-	case "set":
+		return len(rest) > 0 && rest[0] != "status" && rest[0] != "history"
+	case "set", "certificate":
 		return true
+	case "auth":
+		return len(rest) > 0 && rest[0] == "reconcile"
 	}
 	return false
+}
+
+// kubectl accepts persistent flags before the command (for example
+// "kubectl -n payments delete pod api"). Safety must find the actual verb,
+// otherwise moving a flag can accidentally turn a guarded mutation into a
+// command that appears read-only.
+func kubectlVerb(args []string) (string, []string) {
+	flagsWithValue := map[string]bool{
+		"--as": true, "--as-group": true, "--cache-dir": true,
+		"--certificate-authority": true, "--client-certificate": true,
+		"--client-key": true, "--cluster": true, "--context": true,
+		"--kubeconfig": true, "--namespace": true, "-n": true,
+		"--password": true, "--profile": true, "--profile-output": true,
+		"--request-timeout": true, "--server": true, "-s": true,
+		"--tls-server-name": true, "--token": true, "--user": true,
+		"--username": true, "--v": true, "--vmodule": true,
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return strings.ToLower(args[i+1]), args[i+2:]
+			}
+			return "", nil
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return strings.ToLower(arg), args[i+1:]
+		}
+		name := arg
+		if before, _, ok := strings.Cut(arg, "="); ok {
+			name = before
+		}
+		if flagsWithValue[name] && !strings.Contains(arg, "=") {
+			i++
+		}
+	}
+	return "", nil
 }
 
 func prodLikeContexts(plan Plan) []string {

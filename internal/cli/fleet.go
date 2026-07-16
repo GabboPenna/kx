@@ -2638,6 +2638,8 @@ _kx() {
   local -a commands
   commands=(
     'ctx:manage context tags, scans, and metadata'
+	'history:show recent fleet runs'
+	'doctor:check local setup'
     'why:explain why a resource is unhealthy'
     'matrix:print a fleet resource matrix'
     'diff:show sanitized resource drift'
@@ -2656,7 +2658,7 @@ compdef _kx kx
 `
 
 const fishCompletion = `
-complete -c kx -f -a "ctx why explain matrix diff drift logs events can access completion shell-init prompt"
+complete -c kx -f -a "ctx history doctor why explain matrix diff drift logs events can access completion shell-init prompt"
 `
 
 const bashPrompt = `
