@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">kx</title>
+  <desc id="desc">kx logo and the words safe multi-cluster kubectl workflows.</desc>
+  <defs>
+    <linearGradient id="blue" x1="70" y1="65" x2="300" y2="310" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#79c0ff"/><stop offset="1" stop-color="#388bfd"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="360" rx="36" fill="#fff"/>
+  <rect x="24" y="24" width="312" height="312" rx="70" fill="#0d1117"/>
+  <path d="M103 94v172m0-62 68-64m-55 52 58 74" fill="none" stroke="url(#blue)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m194 147 68 119m0-119-68 119" fill="none" stroke="#f0f6fc" stroke-width="30" stroke-linecap="round"/>
+  <g fill="#7ee787" stroke="#0d1117" stroke-width="4">
+    <circle cx="103" cy="94" r="14"/><circle cx="262" cy="147" r="14"/><circle cx="262" cy="266" r="14"/>
+  </g>
+  <text x="390" y="203" fill="#0d1117" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="158" font-weight="700" letter-spacing="-14">kx</text>
+  <text x="402" y="268" fill="#57606a" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="34" font-weight="500" letter-spacing="1">SAFE MULTI-CLUSTER KUBECTL WORKFLOWS</text>
+</svg>

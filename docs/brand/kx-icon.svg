@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">kx</title>
+  <desc id="desc">The kx monogram, connecting one command path to multiple context nodes.</desc>
+  <defs>
+    <linearGradient id="blue" x1="90" y1="90" x2="410" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#79c0ff"/><stop offset="1" stop-color="#388bfd"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0d1117"/>
+  <path d="M126 116v280m0-102 112-104m-90 84 95 122"
+        fill="none" stroke="url(#blue)" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m275 202 112 194m0-194L275 396"
+        fill="none" stroke="#f0f6fc" stroke-width="48" stroke-linecap="round"/>
+  <g fill="#7ee787" stroke="#0d1117" stroke-width="5">
+    <circle cx="126" cy="116" r="21"/>
+    <circle cx="387" cy="202" r="21"/>
+    <circle cx="387" cy="396" r="21"/>
+  </g>
+</svg>

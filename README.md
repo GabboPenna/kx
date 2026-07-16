@@ -1,4 +1,6 @@
-# kx
+<p align="center">
+  <img src="docs/brand/kx-logo.svg" alt="kx — safe multi-cluster kubectl workflows" width="680">
+</p>
 
 **One kubectl workflow across every cluster.**
 
